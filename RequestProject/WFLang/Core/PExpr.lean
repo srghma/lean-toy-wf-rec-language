@@ -18,11 +18,13 @@ inductive PExpr (Γ : List Ty) : Ty → Type where
   | not : PExpr Γ .bool → PExpr Γ .bool
   | un {a b : Ty} : UnOp a b → PExpr Γ a → PExpr Γ b
   | ite {t : Ty} : PExpr Γ .bool → PExpr Γ t → PExpr Γ t → PExpr Γ t
+  deriving DecidableEq, Repr, Hashable
 
 /-- Lists of call-free expressions (argument tuples). -/
 inductive PExprs (Γ : List Ty) : List Ty → Type where
   | nil : PExprs Γ []
   | cons {t : Ty} {ts : List Ty} : PExpr Γ t → PExprs Γ ts → PExprs Γ (t :: ts)
+  deriving DecidableEq, Repr, Hashable
 
 def PExpr.eval {Γ : List Ty} (env : Env Γ) : {t : Ty} → PExpr Γ t → t.denote
   | _, .var v => v.get env

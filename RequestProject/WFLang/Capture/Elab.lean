@@ -1,4 +1,5 @@
 import RequestProject.WFLang.Capture.Stmt
+import RequestProject.WFLang.Capture.LeanWhile
 
 /-!
 # `#lean_wf_func_to_term f` — capture a well-founded Lean function as a `PCL.Term`
@@ -362,8 +363,18 @@ result of object types, possibly proof parameters and a subtype result) as a `PC
 function arguments `aᵢ`. -/
 syntax (name := wfToTerm) "#lean_wf_func_to_term " term:max : term
 
+/-- A function written with Lean's `while` loops (or calling such functions) is captured through
+its well-founded version `f.wf` (`Capture/LeanWhile.lean`), generated here with the default
+termination arguments if `lean_while_to_wf f` was not run before. -/
+def whileTarget (fn : FnRef) : TermElabM FnRef := do
+  if fn.isSpec || !fn.group.isEmpty then return fn
+  unless ← WFLang.LeanWhile.needsWF fn.name do return fn
+  unless (← getEnv).contains (fn.name ++ `eq_wf) do
+    WFLang.LeanWhile.genWF fn.name #[]
+  return { name := fn.name ++ `wf }
+
 @[term_elab wfToTerm] def elabWfToTerm : TermElab := fun stx expectedType? => do
-  let fn ← captureTarget stx[1]
+  let fn ← whileTarget (← captureTarget stx[1])
   elabTerm (← captureStx fn) expectedType?
 
 /-- `wf_agree` proves the agreement theorem of a program produced by
@@ -512,7 +523,23 @@ def hoAgree (f gRef : FnRef) (t : Ident) : Tactic.TacticM Unit := do
       case heq => simp)))
   hoEqProof f gRef
 
+/-- For a function `f` written with Lean's `while` loops: rewrite `f` into its well-founded
+version `f.wf` (`f.eq_wf h`, with a hypothesis `h : WFLang.LoopLaw` from the context). -/
+def rewriteWhileFns : Tactic.TacticM Unit := Tactic.withMainContext do
+  let goal ← instantiateMVars (← Tactic.getMainTarget)
+  let env ← getEnv
+  let fns := (goal.getUsedConstants.filter fun c =>
+    env.contains (c ++ `eq_wf) && env.contains (c ++ `wf))
+  if fns.isEmpty then return
+  let some h := (← getLCtx).findDecl? fun d =>
+      if d.type.consumeMData.isConstOf ``WFLang.LoopLaw then some d.toExpr else none |
+    throwError "wf_agree: {fns[0]!} uses Lean's `while` loop: the agreement needs a hypothesis `h : WFLang.LoopLaw`"
+  let hStx ← exprToSyntax h
+  for f in fns do
+    Tactic.evalTactic (← `(tactic| simp only [$(mkIdent (f ++ `eq_wf)):ident $hStx:term]))
+
 @[tactic wfAgree] def evalWfAgree : Tactic.Tactic := fun _ => do
+  rewriteWhileFns
   let (t, f, eqDef, _) ← agreeTarget "wf_agree"
   -- the functions whose values are identified in the proof: the loop callees and
   -- the global functions (also those called only from the function arguments of a

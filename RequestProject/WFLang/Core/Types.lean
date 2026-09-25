@@ -23,7 +23,7 @@ inductive Ty where
   | int
   | prod (s t : Ty)
   | list (t : Ty)
-  deriving DecidableEq, Repr
+  deriving DecidableEq, Repr, Hashable, Ord, Inhabited
 
 /-- Denotation of object types. -/
 @[reducible] def Ty.denote : Ty → Type
@@ -40,6 +40,25 @@ instance Ty.decEq : (t : Ty) → DecidableEq t.denote
   | .int => inferInstanceAs (DecidableEq Int)
   | .prod s t => @instDecidableEqProd _ _ (Ty.decEq s) (Ty.decEq t)
   | .list t => @instDecidableEqList _ (Ty.decEq t)
+
+/-- `Repr` of the denotations (used by the derived `Repr` of expressions with literals). -/
+instance Ty.instRepr : (t : Ty) → Repr t.denote
+  | .nat => inferInstanceAs (Repr Nat)
+  | .bool => inferInstanceAs (Repr Bool)
+  | .int => inferInstanceAs (Repr Int)
+  | .prod s t =>
+    letI := Ty.instRepr s; letI := Ty.instRepr t; inferInstanceAs (Repr (s.denote × t.denote))
+  | .list t => letI := Ty.instRepr t; inferInstanceAs (Repr (List t.denote))
+
+/-- `Hashable` of the denotations (used by the derived `Hashable` of expressions). -/
+instance Ty.instHashable : (t : Ty) → Hashable t.denote
+  | .nat => inferInstanceAs (Hashable Nat)
+  | .bool => inferInstanceAs (Hashable Bool)
+  | .int => inferInstanceAs (Hashable Int)
+  | .prod s t =>
+    letI := Ty.instHashable s; letI := Ty.instHashable t
+    inferInstanceAs (Hashable (s.denote × t.denote))
+  | .list t => letI := Ty.instHashable t; inferInstanceAs (Hashable (List t.denote))
 
 /-- `bool_eq` at every object type. -/
 def Ty.beq : (t : Ty) → t.denote → t.denote → Bool
@@ -66,6 +85,7 @@ def Ty.default : (t : Ty) → t.denote
 inductive Var : List Ty → Ty → Type where
   | here {Γ : List Ty} {t : Ty} : Var (t :: Γ) t
   | there {Γ : List Ty} {s t : Ty} : Var Γ t → Var (s :: Γ) t
+  deriving DecidableEq, Repr, Hashable
 
 /-- Variable lookup. -/
 def Var.get : {Γ : List Ty} → {t : Ty} → Var Γ t → Env Γ → t.denote
@@ -76,6 +96,7 @@ def Var.get : {Γ : List Ty} → {t : Ty} → Var Γ t → Env Γ → t.denote
 structure Sig where
   args : List Ty
   ret : Ty
+  deriving DecidableEq, Repr, Hashable, Inhabited
 
 /-- Curried Lean function type `a₁ → … → aₙ → r`. -/
 @[reducible] def FnType : List Ty → Ty → Type
@@ -150,6 +171,7 @@ inductive BinOp : Ty → Ty → Ty → Type where
   | cons (t : Ty) : BinOp t (.list t) (.list t)
   /-- `l₁ ++ l₂` -/
   | append (t : Ty) : BinOp (.list t) (.list t) (.list t)
+  deriving DecidableEq, Repr, Hashable
 
 /-- Meaning of the primitive operators. -/
 def BinOp.eval : {a b c : Ty} → BinOp a b c → a.denote → b.denote → c.denote
@@ -201,6 +223,7 @@ inductive UnOp : Ty → Ty → Type where
   | tail (t : Ty) : UnOp (.list t) (.list t)
   | isNil (t : Ty) : UnOp (.list t) .bool
   | length (t : Ty) : UnOp (.list t) .nat
+  deriving DecidableEq, Repr, Hashable
 
 /-- Meaning of the unary operators. -/
 def UnOp.eval : {a b : Ty} → UnOp a b → a.denote → b.denote

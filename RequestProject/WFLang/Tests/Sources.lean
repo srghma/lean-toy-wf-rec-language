@@ -15,14 +15,14 @@ theorems into `SourceProofs.lean`.  This file accounts for **each** of those fun
 | `ack`                        | Ack       | captured (global function)          | `ExPCL.ack_agree`    |
 | `ack999`                     | Ack       | captured (0 arguments)              | `ack999_agree` below |
 | `ack2`                       | Ack       | captured (recursion through `ackInner`'s function argument) | `ack2_term_agree` below; also `ack2_agree` (via `ack`) |
-| `ackWhile`                   | Ack       | rejected: `while` loop              | runtime check below  |
+| `ackWhile`                   | Ack       | rejected: `while` loop with no simple measure | runtime check below  |
 | `…Cantor….pair`              | Ack       | captured (no recursion)             | `ExNonRec.pair_agree` |
-| `…Cantor….isqrt`             | Ack       | rejected: `while` loop              | runtime check below  |
-| `…Cantor….unpairLeft/Right`  | Ack       | rejected: global `isqrt` is a loop  | runtime check below  |
-| `…Cantor….ackNoDataStructure`| Ack       | rejected: `while` loop              | runtime check below  |
+| `…Cantor….isqrt`             | Ack       | captured (`while` loop, `Tests/LeanWhile.lean`) | `LeanWhilePCL.isqrt_agree` (under `LoopLaw`) |
+| `…Cantor….unpairLeft/Right`  | Ack       | captured (calls `isqrt`, `Tests/LeanWhile.lean`) | `LeanWhilePCL.unpairLeft_agree`, `…unpairRight_agree` (under `LoopLaw`) |
+| `…Cantor….ackNoDataStructure`| Ack       | rejected: `while` loop with no simple measure | runtime check below  |
 | `diagonal`                   | Diagonal  | captured                            | `ExPCL.diagonal_agree` |
 | `diagonal_tr`                | Diagonal  | captured                            | `ExPCL.diagonal_tr_agree` |
-| `diagonalWhile`              | Diagonal  | rejected: `while` loop              | runtime check below  |
+| `diagonalWhile`              | Diagonal  | captured (`while` loop, measure given in `Tests/LeanWhile.lean`) | `LeanWhilePCL.diagonalWhile_agree`; `LeanWhileProofs.diagonalWhile_eq` (under `LoopLaw`) |
 | `hyper`                      | Hyper     | captured (global function)          | `ExPCL.hyper_agree`  |
 | `hyperBase`                  | Hyper     | captured (no recursion)             | `ExNonRec.hyperBase_agree` |
 | `hyperLoop`                  | Hyper     | captured when specialised, e.g. `(hyperLoop (hyperBase 2))` | `hyperLoop_agree` below |
@@ -31,7 +31,7 @@ theorems into `SourceProofs.lean`.  This file accounts for **each** of those fun
 | `mc91`                       | Mc91      | captured (no recursion)             | `ExNonRec.mc91_agree` |
 | `mc91Loop`                   | Mc91      | captured                            | `ExPCL.mc91Loop_agree` |
 | `mc91TR`                     | Mc91      | captured (calls `mc91Loop`)         | `MorePCL.mc91TR_agree` |
-| `mc91While`                  | Mc91      | rejected: `while` loop              | runtime check below  |
+| `mc91While`                  | Mc91      | captured (`while` loop, measure given in `Tests/LeanWhile.lean`) | `LeanWhilePCL.mc91While_agree`; `LeanWhileProofs.mc91While_eq` (under `LoopLaw`) |
 | `iter`                       | Mc91      | captured when specialised: `(iter mc91)` | `iter_mc91_agree'` below; also `iter_mc91_agree` (via `mc91Loop`) |
 | `Safe`                       | Boom      | rejected: a proposition             | —                    |
 | `boom`                       | Boom      | captured (precondition `Safe n`)    | `boom_agree` below   |
@@ -41,9 +41,11 @@ theorems into `SourceProofs.lean`.  This file accounts for **each** of those fun
 
 "via `f`" means: the function itself cannot be captured, but a theorem of the uploaded file
 (`SourceProofs.lean`) says it equals a captured function `f`, so the `PCL` program of `f`
-computes it; the agreement theorem is proved here.  The `while`-loop functions cannot be
-reasoned about in this Lean version (see `SourceProofs.lean`), so they are only compared with
-the `PCL` programs on sample inputs.
+computes it; the agreement theorem is proved here.  Lean's `while` loop (`Lean.Loop.forIn`) is a
+`partial def`, opaque to the logic: the agreement theorems of the `while`-loop functions
+(`Tests/LeanWhile.lean`) assume its unfolding law `WFLang.LoopLaw` as a hypothesis.  The two
+loops without a simple measure (`ackWhile`, `ackNoDataStructure`) are only compared with the
+`PCL` programs on sample inputs, as are the other loops (below).
 -/
 
 open WFLang
@@ -166,40 +168,27 @@ end SourcesPCL
 `#expect_reject` (from `MoreChecks.lean`) succeeds only if the capture fails, and reports the
 first line of the error message. -/
 
--- `while` loops: Lean builds them with `Lean.Loop.forIn`, which has no termination proof.
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
+-- Lean's `while` loops are captured through their well-founded version (`Tests/LeanWhile.lean`,
+-- which captures `isqrt`, `unpairLeft`, `unpairRight`, `diagonalWhile` and `mc91While`), but
+-- only if the loop's termination can be proved: Lean does not guess a measure for these loops,
+-- which must be given with `lean_while_to_wf f termination_by …`.  `ackWhile` and
+-- `ackNoDataStructure` (an explicit stack) have no simple measure.
+/-- info: rejected: lean_while_to_wf: cannot prove that loop 1 of Tco.ackWhile terminates: give its measure, `lean_while_to_wf Tco.ackWhile termination_by …` (and `decreasing_by …`) -/
 #guard_msgs in
 #expect_reject (#lean_wf_func_to_term Tco.ackWhile : PCL.Term ⟨[.nat, .nat], .nat⟩)
 
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term Tco.AckWithoutStackButUsingCantorPairing.isqrt :
-  PCL.Term ⟨[.nat], .nat⟩)
-
--- `unpairLeft`/`unpairRight` are not recursive, but the `isqrt` they call (a global function) is
--- a loop.
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term Tco.AckWithoutStackButUsingCantorPairing.unpairLeft :
-  PCL.Term ⟨[.nat], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term Tco.AckWithoutStackButUsingCantorPairing.unpairRight :
-  PCL.Term ⟨[.nat], .nat⟩)
-
--- (the calls of `unpairLeft`/`unpairRight` are inside the body of Lean's `while` loop)
-/-- info: rejected: #lean_wf_func_to_term: call in an unsupported position -/
+/-- info: rejected: lean_while_to_wf: cannot prove that loop 1 of Tco.AckWithoutStackButUsingCantorPairing.ackNoDataStructure terminates: give its measure, `lean_while_to_wf Tco.AckWithoutStackButUsingCantorPairing.ackNoDataStructure termination_by …` (and `decreasing_by …`) -/
 #guard_msgs in
 #expect_reject
   (#lean_wf_func_to_term Tco.AckWithoutStackButUsingCantorPairing.ackNoDataStructure :
     PCL.Term ⟨[.nat, .nat], .nat⟩)
 
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
+-- Without their measures (given in `Tests/LeanWhile.lean`):
+/-- info: rejected: lean_while_to_wf: cannot prove that loop 1 of Tco.diagonalWhile terminates: give its measure, `lean_while_to_wf Tco.diagonalWhile termination_by …` (and `decreasing_by …`) -/
 #guard_msgs in
 #expect_reject (#lean_wf_func_to_term Tco.diagonalWhile : PCL.Term ⟨[.nat, .nat], .nat⟩)
 
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
+/-- info: rejected: lean_while_to_wf: cannot prove that loop 1 of Tco.mc91While terminates: give its measure, `lean_while_to_wf Tco.mc91While termination_by …` (and `decreasing_by …`) -/
 #guard_msgs in
 #expect_reject (#lean_wf_func_to_term Tco.mc91While : PCL.Term ⟨[.nat], .nat⟩)
 
@@ -226,7 +215,7 @@ first line of the error message. -/
 #guard_msgs in
 #expect_reject (#lean_wf_func_to_term Tco.boom : PCL.Term ⟨[.nat], .nat⟩)
 
-/-! ## Rejected `while` loops, compared with the `PCL` programs at runtime -/
+/-! ## `while` loops, compared with the `PCL` programs at runtime -/
 
 /-- info: true -/
 #guard_msgs in

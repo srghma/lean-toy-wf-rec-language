@@ -1257,6 +1257,10 @@ macro_rules
         | (simp_all <;> (try simp only [WFLang.Ty.denote] at *) <;> omega)
         | (simp only [WellFoundedRelation.rel, InvImage, Nat.lt_wfRel, sizeOf_nat] at *
            solve_by_elim)
+        | (simp only [WellFoundedRelation.rel, InvImage, Nat.lt_wfRel, sizeOf_nat, bne_iff_ne,
+              beq_iff_eq, ne_eq, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq,
+              Bool.not_eq_true'] at *
+           solve_by_elim)
         | decreasing_tactic)
 
 macro_rules

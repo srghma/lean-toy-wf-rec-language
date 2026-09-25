@@ -91,7 +91,8 @@ argument receives the membership proof (`i ∈ l`) that termination proofs use.
 
 | not supported | example | evidence |
 |---|---|---|
-| Lean's own `while` in `do` notation, `partial def` | `Tco.ackWhile`, `Tco.mc91While`, `Tco.diagonalWhile`, `isqrt` | [pinned] (`Tests/Sources.lean`, `Tests/While.lean`) |
+| Lean's own `while` in `do` notation with `return` inside the loop, in a recursive function, or without a provable measure | `LeanWhileRejected.findDiv`, `LeanWhileRejected.recLoop`, `Tco.ackWhile`, `Tco.ackNoDataStructure` | [pinned] (`Tests/LeanWhile.lean`, `Tests/Sources.lean`) |
+| `partial def` | | [documented] |
 | `partial_fixpoint` | `pfix` → `recursive call … outside its definition` | [pinned] |
 | mutual recursion with different parameter or result types | `mA : Nat → Nat` / `mB : Nat → Bool → Nat`; `rA : Nat → Nat` / `rB : Nat → Bool` | [pinned] |
 | a call inside the test or body of a well-founded `wf_while` loop | `WhileEx.callInBody` | [pinned] (`Tests/While.lean`) |
@@ -100,7 +101,12 @@ argument receives the membership proof (`i ∈ l`) that termination proofs use.
 
 Details:
 
-* **Non-well-founded definitions.** Lean builds `while`, `partial` and `partial_fixpoint` without
+* **Lean's own `while`.** Supported through `lean_while_to_wf` (`Capture/LeanWhile.lean`) under
+  the hypothesis `LoopLaw` (the unfolding law of `Lean.Loop.forIn`, which Lean cannot prove since
+  `Loop.forIn` is a `partial def`); `isqrt`, `diagonalWhile` and `mc91While` are captured this way
+  in `Tests/LeanWhile.lean`. Not supported: `return` inside a loop (the loop state would carry an
+  early-exit value), recursive functions containing a loop, and loops without a measure.
+* **Non-well-founded definitions.** Lean builds `partial` and `partial_fixpoint` without
   a termination proof that can be reused, so there is nothing to translate. The workaround is to
   rewrite the loop with `wf_while … termination_by μ` or `WFLang.whileWF` (`Core/While.lean`), as
   `Tests/WhileFunctions.lean` does for `diagonalWhile`, `mc91While` and Newton's `isqrt`. Those

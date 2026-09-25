@@ -108,9 +108,16 @@ The agreement proof shows that the node computes
   function (a second, different loop whose body calls `f` is rejected); `f` and `g` must have
   the same result type; no proof parameters or subtype result; the calls of `f` inside the
   function argument may not be under a further binder.
-* **Not well-founded definitions**: Lean's own `while` loops in `do` notation (`Tco.ackWhile`,
-  `Tco.diagonalWhile`, `Tco.mc91While`, `isqrt`, …), `partial def`, `partial_fixpoint`. Lean
-  builds them without any termination proof (`Lean.Loop.forIn` / opaque implementations), so
+* **Lean's own `while` loops** are now captured through `lean_while_to_wf`
+  (`Capture/LeanWhile.lean`, `Tests/LeanWhile.lean`): each loop becomes a well-founded
+  tail-recursive function with a measure given by the user (or guessed by Lean), and agreement is
+  proved under the hypothesis `LoopLaw`, the unfolding law of `Lean.Loop.forIn` (which is a
+  `partial def`, opaque to the logic). `isqrt`, `unpairLeft`, `unpairRight`, `diagonalWhile` and
+  `mc91While` are captured this way. Still rejected: `return` inside a loop, recursive functions
+  containing a loop, and `ackWhile` / `ackNoDataStructure` (no measure: the stack needs a
+  multiset order).
+* **Not well-founded definitions**: `partial def`, `partial_fixpoint`. Lean
+  builds them without any termination proof (opaque implementations), so
   there is no relation or decreasing proof to reuse. They can be captured after being rewritten
   with the **well-founded `while`** (`wf_while … termination_by μ`, or `WFLang.whileWF` with an
   invariant, `Core/While.lean`). The capture turns such a loop into a `PCL` `while` statement,

@@ -93,6 +93,10 @@ abbrev FnVal (f : Fn) : Type := (x : Env f.params) → f.pre x → {v : f.ret.de
 inductive FnVar : List Fn → Fn → Type where
   | here {fs : List Fn} {f : Fn} : FnVar (f :: fs) f
   | there {fs : List Fn} {f g : Fn} : FnVar fs f → FnVar (g :: fs) f
+  deriving DecidableEq, Repr
+
+/-- There is no global function in the empty global context. -/
+instance FnVar.instIsEmptyNil {f : Fn} : IsEmpty (FnVar [] f) := ⟨nofun⟩
 
 /-- Values of the global functions. -/
 def FEnv : List Fn → Type
@@ -121,6 +125,10 @@ inductive JScope : List Ty → Ty → Type where
       (Q : Env Γ → t.denote → Prop) : JScope Γ t
   | wk {Γ : List Ty} {t : Ty} (js : JScope Γ t) (s : Ty) : JScope (s :: Γ) t
 
+/-- The empty join-point scope. (`JScope` has no decidable equality: its entries carry
+arbitrary predicates.) -/
+instance JScope.instInhabited {Γ : List Ty} {t : Ty} : Inhabited (JScope Γ t) := ⟨.nil⟩
+
 /-- Typed de Bruijn indices of join points. -/
 inductive JVar : {Γ : List Ty} → {t : Ty} → JScope Γ t → Type where
   | here {Γ : List Ty} {t : Ty} {js : JScope Γ t} {s : Ty} {P : Env Γ → s.denote → Prop}
@@ -128,6 +136,7 @@ inductive JVar : {Γ : List Ty} → {t : Ty} → JScope Γ t → Type where
   | there {Γ : List Ty} {t : Ty} {js : JScope Γ t} {s : Ty} {P : Env Γ → s.denote → Prop}
       {Q : Env Γ → t.denote → Prop} : JVar js → JVar (.bind js s P Q)
   | wk {Γ : List Ty} {t : Ty} {js : JScope Γ t} {s : Ty} : JVar js → JVar (.wk js s)
+  deriving DecidableEq, Repr
 
 /-- The parameter type of a join point. -/
 def JVar.arg : {Γ : List Ty} → {t : Ty} → {js : JScope Γ t} → JVar js → Ty

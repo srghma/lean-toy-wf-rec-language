@@ -10,6 +10,9 @@ no termination proof and cannot be unfolded in proofs.  These are the same loops
 well-founded loop of `Core/While.lean` (the notation `wf_while`, or `WFLang.whileWF` with an
 invariant): each one states its termination measure, and is captured by
 `#lean_wf_func_to_term` as a `PCL` `while` statement (`Tests/While.lean`).
+
+The uploaded `while` functions themselves are captured too, through `lean_while_to_wf` and the
+unfolding law `LoopLaw` of Lean's `while` (`Tests/LeanWhile.lean`).
 -/
 
 open WFLang

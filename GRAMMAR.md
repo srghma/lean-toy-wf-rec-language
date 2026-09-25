@@ -95,7 +95,12 @@ The test is a `PExpr` with `isLoopCond`: in normal form and not a literal. Unlik
 `if`, it may be a negation (`Expr.whileBody` swaps the branches itself).
 
 **Lean side.** Lean's `while` (in `do` notation) is built on `Loop.forIn`, a `partial def`. It
-has no termination proof and cannot be unfolded in proofs, so the capture cannot reuse it. The
+has no termination proof and cannot be unfolded in proofs. `lean_while_to_wf f` (with one
+`termination_by`/`decreasing_by` per loop) builds a well-founded version `f.wf` of `f`, whose
+loops are tail-recursive well-founded functions `f.loop_i` on the mutable variables, and proves
+`f.eq_wf : LoopLaw → ∀ xs, f xs = f.wf xs`, where `LoopLaw` (`Core/LeanWhile.lean`) is the
+unfolding law of `Loop.forIn`; `#lean_wf_func_to_term f` captures `f.wf` (each `f.loop_i` becomes a
+recursive join point), and `wf_agree` uses a hypothesis `h : LoopLaw`. Another
 well-founded replacement is `WFLang.whileWF R wf inv c body step init hinit` (`Core/While.lean`).
 There is also its measure form `whileMeasure μ c body dec init`, with the notation
 

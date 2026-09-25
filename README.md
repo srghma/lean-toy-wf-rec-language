@@ -130,8 +130,7 @@ The capture supports:
 * **well-founded `while` loops** written with `wf_while x := init while c do body termination_by μ`
   (optionally `decreasing_by tac`) or `WFLang.whileWF` (relation + invariant), from
   `Core/While.lean`. Each loop becomes one `whileLoop` (a `join` and a `joinrec`); the test and
-  the body must be call-free. Lean's own `while` in `do` notation is `partial` (no termination proof, cannot be
-  unfolded in proofs), so it stays rejected; `Tests/WhileFunctions.lean` transcribes the uploaded
+  the body must be call-free. `Tests/WhileFunctions.lean` transcribes the uploaded
   `diagonalWhile`, `mc91While` and Newton `isqrt` loops with their measures:
 
   ```lean
@@ -141,13 +140,48 @@ The capture supports:
   def isqrtNewton_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term isqrtNewton
   theorem isqrtNewton_agree : ∀ n, Term.eval isqrtNewton_term n = isqrtNewton n := by wf_agree
   ```
+* **Lean's own `while` in `do` notation** (`Capture/LeanWhile.lean`, `Tests/LeanWhile.lean`).
+  Lean builds it on `Lean.Loop.forIn`, a `partial def` that the logic cannot unfold, so the
+  command `lean_while_to_wf f termination_by μ₁ … termination_by μₖ` (one optional measure and
+  `decreasing_by` per loop, in source order; Lean guesses a measure when none is given) generates
+  a well-founded version: each loop becomes a tail-recursive well-founded function `f.loop_i` on
+  its mutable variables, `f.wf` is `f` with its loops replaced by them, and
+  `f.eq_wf : LoopLaw → ∀ xs, f xs = f.wf xs`. `LoopLaw` (`Core/LeanWhile.lean`) is the unfolding
+  equation of `while` (`forIn Loop.mk init body` runs `body` and continues or stops); it cannot be
+  proved inside Lean because `Loop.forIn` is opaque, so it is an explicit hypothesis of every
+  agreement theorem (`loopLaw_satisfiable` shows it is consistent: its intended solution exists).
+  `#lean_wf_func_to_term f` captures `f.wf` (running `lean_while_to_wf f` first if needed) and
+  `wf_agree` proves agreement from `h : LoopLaw`:
+
+  ```lean
+  def gcdW (a b : Nat) : Nat := Id.run do
+    let mut a := a
+    let mut b := b
+    while b != 0 do
+      let t := b
+      b := a % b
+      a := t
+    return a
+  lean_while_to_wf gcdW
+    termination_by b
+    decreasing_by all_goals exact Nat.mod_lt _ (by simp_all; omega)
+  def gcdW_term : Term ⟨[.nat, .nat], .nat⟩ := #lean_wf_func_to_term gcdW
+  theorem gcdW_agree (h : LoopLaw) : ∀ a b, Term.eval gcdW_term a b = gcdW a b := by wf_agree
+  ```
+
+  Supported: `break`, several loops in a row, nested loops, `match`/`if` in the body, loops
+  reading earlier values, callers of functions with loops. The uploaded `isqrt` (and
+  `unpairLeft`/`unpairRight`), `diagonalWhile` and `mc91While` are captured this way, and
+  `diagonalWhile_eq` (omitted before) is proved under `LoopLaw`. Not supported: `return` inside a
+  loop, recursive functions containing a loop, and loops without a provable measure
+  (`ackWhile`, `ackNoDataStructure`, whose stack needs a multiset order).
 * bounded `for` loops and `Nat.fold`, and function parameters specialised to the function
   passed at each call site, including recursion through a function argument
   (`Tco.hyperWhile`, `Tco.hyperTCO`, `Tco.ack2`).
 
 `GAPS.md` lists what is still rejected (e.g. calls under a `fun` in library code such as
-`List.map`, Lean's own `while` loops in `do` notation, which Lean builds without a termination
-proof, and calls inside the body of a well-founded `while`).
+`List.map`, Lean `while` loops with an early `return` or without a provable measure, and calls
+inside the body of a `wf_while`).
 `UNSUPPORTED.md` is the current assessment of everything still unsupported (types, library
 combinators, `do` features, termination arguments, evaluator limits); its rejections are pinned in
 `Tests/Unsupported.lean`.
@@ -178,6 +212,45 @@ pair `(v, env)`, which breaks the elaboration of the captured programs); `hoRel_
 through a function argument) is not a lexicographic or inverse-image order, so it keeps its own
 proof.
 
+## Instances of the grammar datatypes
+
+| datatype | instances |
+|---|---|
+| `Ty` | `DecidableEq`, `Repr`, `Hashable`, `Ord`, `Inhabited` |
+| `Ty.denote t` (values) | `DecidableEq`, `Repr`, `Hashable` (by recursion on `t`) |
+| `Sig` | `DecidableEq`, `Repr`, `Hashable`, `Inhabited` |
+| `Var Γ t` | `DecidableEq`, `Repr`, `Hashable`; `IsEmpty (Var [] t)` |
+| `BinOp a b c`, `UnOp a b` | `DecidableEq`, `Repr`, `Hashable` |
+| `PExpr Γ t`, `PExprs Γ ts` | `DecidableEq`, `Repr`, `Hashable`, `Inhabited` (literals) |
+| `FnVar fs f`, `JVar js` | `DecidableEq`, `Repr`; `IsEmpty (FnVar [] f)` |
+| `JScope Γ t` | `Inhabited` |
+
+Every `DecidableEq` instance also gives `BEq` with `ReflBEq` and `LawfulBEq` (so `==` agrees
+with `=`), and together with `Hashable` it gives `LawfulHashable`. A separate `deriving BEq`
+is not added, because it would give a second `==`, different from the lawful one.
+
+`Fn`, `Self`, `JScope`, `Expr`, `Globals` and `PTerm` cannot have `DecidableEq` or `Repr`:
+their fields contain predicates (`pre`, `post`, `P`, `Q`, the path condition `G`),
+relations (`R`) and proofs. Equality of such fields cannot be decided.
+
+**Functor / Traversable.** Lean's `Functor`, `LawfulFunctor`, `Traversable` and
+`LawfulTraversable` apply only to type constructors `Type u → Type v`. None of the grammar
+datatypes has that shape: they are families indexed by object types and contexts. The only
+thing an expression "contains" is its variables. `Core/PExprMap.lean` therefore gives
+the same structure over the variables, with the same laws, proved:
+
+* `PExpr.rename f` / `PExprs.rename f` map a renaming `f : ∀ {t}, Var Γ t → Var Δ t`
+  (the `map` analogue). They satisfy the functor laws `rename_id` and `rename_rename`, weakening
+  is a renaming (`wk_eq_rename`), and renaming commutes with evaluation (`eval_rename`).
+* `PExpr.traverseVars f` / `PExprs.traverseVars f` do an effectful renaming in any
+  applicative functor (the `traverse` analogue). They satisfy the `LawfulTraversable` laws:
+  identity (`traverseVars_id`), composition through `Functor.Comp` (`traverseVars_comp`),
+  pure traversal equals map (`traverseVars_pure`), and naturality for applicative
+  transformations (`traverseVars_naturality`).
+
+`Tests/Instances.lean` checks that each instance is found, that equality is decided both by
+`decide` and by `#eval`, and that the printing, hashing, renaming and traversal functions run.
+
 ## Layout
 
 ```
@@ -187,7 +260,11 @@ RequestProject/WFLang/
 ├── Core/Loops.lean                 rangeLoop: first-order form of `for` loops and `Nat.fold`
 ├── Core/While.lean                 well-founded `while` in Lean: whileWF, whileMeasure, `wf_while`,
 │                                   loop equation, loopVal
+├── Core/LeanWhile.lean             LoopLaw: the unfolding law of Lean's `while` (Loop.forIn);
+│                                   its consequences and its satisfiability
 ├── Core/PExpr.lean                 call-free expressions PExpr / PExprs
+├── Core/PExprMap.lean              renaming (functor laws) and traversal (traversable laws) of
+│                                   PExpr / PExprs; Inhabited / IsEmpty instances
 ├── Core/Normal.lean                optimised normal form: PExpr.isNF, PExpr.isCond
 ├── PCL/Lang.lean                   Expr (ret, ite, fixSelfCall, gCall, join, joinrec, jump),
 │                                   eval, Globals, PTerm/Term, soundness, whileLoop (derived)
@@ -200,6 +277,8 @@ RequestProject/WFLang/
 │                                   context (callees: loops or globals)
 ├── Capture/Stmt.lean               Lean term → statements: A-normal form, join points, loops
 │                                   for tail-recursive inlinable callees, global calls, `while`
+├── Capture/LeanWhile.lean          `lean_while_to_wf f`: well-founded versions f.loop_i, f.wf of
+│                                   a function using Lean's `while`, and f.eq_wf (under LoopLaw)
 ├── Capture/Elab.lean               the lazily collected global context, #lean_wf_func_to_term,
 │                                   wf_agree
 └── Tests/                          the PCL test suite
@@ -227,8 +306,11 @@ RequestProject/WFLang/
     ├── While.lean                  a hand-written `while` program with its specification;
     │                               captures of the loops + agreement theorems, shapes,
     │                               runtime checks, rejections
-    └── Loops.lean                  tail-recursive @[inlinable] functions inlined as loops
-                                    (recursive join points) inside the caller
+    ├── Loops.lean                  tail-recursive @[inlinable] functions inlined as loops
+    │                               (recursive join points) inside the caller
+    └── LeanWhile.lean              Lean's own `while`: the uploaded loops and others captured,
+                                    agreement under LoopLaw, diagonalWhile_eq, runtime checks,
+                                    rejections
 GAPS.md                             what is supported, how, and what is left
 GRAMMAR.md                          grammar layers: why join points, why no Atom layer
 CONTEXTS_ASSESSMENT.md              the design note behind removing local functions and adding

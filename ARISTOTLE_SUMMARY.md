@@ -1,3 +1,58 @@
+# Summary of changes for run 19e5890b-693b-4cf5-8c73-5f570ae246ec
+Every grammar datatype that can support these classes now has them. `Functor`/`Traversable` can't be instantiated directly because none of the types has the right shape, so I added the matching operations over variables, with their laws proved. The whole project (all 844 jobs, including the existing tests and `wfbench`) builds with no `sorry` and no warnings. The new laws use only the standard axioms.
+
+**Derived instances** (added as `deriving` clauses where each type is defined):
+- `Ty`: `DecidableEq`, `Repr`, `Hashable`, `Ord`, `Inhabited`.
+- Values of each object type (`Ty.denote t`): `Repr` and `Hashable`, defined by recursion on `t`. This is what lets the literal case of expressions derive; `DecidableEq` was already there.
+- `Sig`: `DecidableEq`, `Repr`, `Hashable`, `Inhabited`.
+- `Var`, `BinOp`, `UnOp`, `PExpr`, `PExprs`: `DecidableEq`, `Repr`, `Hashable`.
+- `FnVar`, `JVar`: `DecidableEq`, `Repr`.
+- `Inhabited` for `PExpr`, `PExprs` (literal defaults) and `JScope`; `IsEmpty` for `Var [] t` and `FnVar [] f`.
+
+`BEq`, `ReflBEq` and `LawfulBEq` come from `DecidableEq`, so `==` always agrees with `=`. Adding `Hashable` then gives `LawfulHashable`. I did not add a separate `deriving BEq`: it would create a second `==` next to the lawful one.
+
+**What can't have these instances:** `Fn`, `Self`, `JScope`, `Expr`, `Globals` and `PTerm` have no decidable equality or `Repr`. Their fields hold predicates, relations and proofs, and equality of those can't be decided.
+
+**Functor / Traversable:** Lean's `Functor`, `LawfulFunctor`, `Traversable` and `LawfulTraversable` only apply to type constructors `Type → Type`. The grammar types are families indexed by object types and contexts, and the only thing an expression contains is its variables. So the new file `Core/PExprMap.lean` gives the same structure over variables, for both `PExpr` and `PExprs`:
+- `rename`, the `map` counterpart, applies a variable renaming. Proved: the functor laws `rename_id` and `rename_rename`, `wk_eq_rename` (weakening is a renaming) and `eval_rename` (renaming commutes with evaluation).
+- `traverseVars`, the `traverse` counterpart, renames with effects in any applicative. Proved: the `LawfulTraversable` laws `traverseVars_id`, `traverseVars_comp` (through `Functor.Comp`), `traverseVars_naturality`, and `traverseVars_pure` (traversing with a pure function is `rename`).
+
+**Tests:** `Tests/Instances.lean` checks that every instance is found. It checks that equality is decided both in proofs (`decide`) and at runtime (`#eval`), and pins the printing, hashing, `compare`, renaming and traversal outputs.
+
+The new files follow the project's existing style and don't use the `module` header, because a module file can't import the project's non-module files. `README.md` has a new section on the instances, and the file layout lists `Core/PExprMap.lean`. The Properties table has entries for the derived instances and for both sets of laws. All work is committed.
+
+# Summary of changes for run 50928003-71d2-4c0c-b054-8ecad1d4f95c
+Functions written with Lean's own `while` in `do` notation can now be captured. There is one condition: every agreement theorem for such a function takes a hypothesis `h : LoopLaw`. Lean defines `while` with a `partial def` (`Lean.Loop.forIn`), which the logic treats as opaque. Without an assumption about how the loop behaves, nothing can be proved about these functions.
+
+**What I added**
+- `Core/LeanWhile.lean`: `LoopLaw` is the equation that unfolds one step of `while`. It is an explicit hypothesis, not an axiom. `loopLaw_satisfiable` proves that some function satisfies this equation. `LoopLaw.forIn_of_exit` proves that, under the law, a loop that stops after `n` steps returns the value it stopped with.
+- `Capture/LeanWhile.lean`: a new command, `lean_while_to_wf f`. You can give each loop, in source order, its own `termination_by` and optional `decreasing_by`; if you give none, Lean guesses a measure. The command generates three things:
+  - `f.loop_i`: each loop rewritten as a tail-recursive, well-founded function over its mutable variables;
+  - `f.wf`: `f` with its loops replaced by those functions;
+  - `f.eq_wf : LoopLaw → ∀ xs, f xs = f.wf xs`.
+- It works on `break`, several loops in a row, nested loops, `match`/`if` inside the body, and functions that call a function containing a loop.
+- If a loop's termination can't be proved, the error names the loop and says how to supply a measure.
+- `#lean_wf_func_to_term f` now captures `f.wf`, running `lean_while_to_wf f` first if you haven't. `wf_agree` proves agreement using the hypothesis `h : LoopLaw`.
+
+**Tests (`Tests/LeanWhile.lean`)**
+- The uploaded `while` functions (`isqrt`, `unpairLeft`, `unpairRight`, `Tco.diagonalWhile`, `Tco.mc91While`) are all captured and proved to agree with the originals under `LoopLaw`.
+- So are 8 new example functions, e.g. `gcdW`, `firstSq` (with `break`), `twoLoops` and `nested`.
+- `diagonalWhile_eq`, the theorem from your uploaded file that was left out before, is now proved under `LoopLaw`, along with `mc91While n = mc91TR n`.
+- Runtime checks compare the captured programs with the compiled Lean functions (which run the real loop), and the loop counts of the captured programs are pinned.
+- The rejection tests in `Tests/Sources.lean` and `Tests/While.lean` were updated to match.
+
+**Still not supported (rejections pinned in tests)**
+- `return` inside a loop.
+- Recursive functions that contain a loop.
+- `ackWhile` and `ackNoDataStructure`: their measure would need an ordering on the stack as a multiset, which isn't available.
+
+**Checks**
+- The full project builds (`lake build`, 838 jobs).
+- There is no `sorry` in any proof. The one match for `sorryAx` is an older placeholder in `Capture/Translate.lean` that only appears in erased proof positions.
+- Spot checks with `#print axioms` show only `propext`, `Classical.choice` and `Quot.sound`.
+
+I updated `README.md`, `GAPS.md`, `UNSUPPORTED.md`, `GRAMMAR.md`, the header of `Tests/WhileFunctions.lean`, and the imports and overview in `RequestProject/WFLang.lean`, and removed two scratch files. The Properties table has new entries for `LoopLaw`, `loopLaw_satisfiable`, the `lean_while_to_wf` command, the agreement theorems and `diagonalWhile_eq`. However, I didn't re-check the older table entries, so any that still say Lean's `while` is rejected are now out of date.
+
 # Summary of changes for run d471d10f-3534-4a2b-a9ff-b165b29060dc
 I implemented the proposal in `CONTEXTS_ASSESSMENT.md`, including the part you highlighted: tail-recursive `@[inlinable]` functions are now inlined as loops inside the caller. The full `lake build` passes, including every test file and every agreement proof, and so does `lake build wfbench`. The project contains no `sorry`. The new theorems I spot-checked (the loop soundness results, `eval_whileLoop` and the loop agreement theorems) use only `propext` and `Quot.sound`.
 

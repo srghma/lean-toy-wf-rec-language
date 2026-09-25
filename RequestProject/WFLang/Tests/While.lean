@@ -21,7 +21,8 @@ it computes the Lean loop `whileWF`.
   invariant, two loops in a row, a loop after a recursive call inside a recursive function, a
   loop in a global function and a loop whose initial state calls a global function.
 * **Runtime checks** against the uploaded (partial) `while` functions.
-* **Rejections**: a call inside the body of a loop, and Lean's own (partial) `while`.
+* **Rejections**: a call inside the body of a loop, and Lean's own `while` without a measure
+  (captured with one in `Tests/LeanWhile.lean`).
 -/
 
 open WFLang PCL
@@ -188,7 +189,8 @@ itself, and `isqrt` for `isqrtSum` and `evenSqrt`.  No loop needs a global funct
 #guard_msgs in
 #expect_reject (#lean_wf_func_to_term WhileEx.callInBody : PCL.Term ⟨[.nat], .nat⟩)
 
--- Lean's own `while` (in `do` notation) is built on a `partial` function: still rejected.
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
+-- Lean's own `while` (in `do` notation) is captured through its well-founded version, if the
+-- termination of the loop can be proved (`Tests/LeanWhile.lean`): here Lean finds no measure.
+/-- info: rejected: lean_while_to_wf: cannot prove that loop 1 of Tco.mc91While terminates: give its measure, `lean_while_to_wf Tco.mc91While termination_by …` (and `decreasing_by …`) -/
 #guard_msgs in
 #expect_reject (#lean_wf_func_to_term Tco.mc91While : PCL.Term ⟨[.nat], .nat⟩)
