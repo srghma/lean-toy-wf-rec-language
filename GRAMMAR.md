@@ -5,6 +5,9 @@ into `Atom` / `Comp` / `Expr`, or given join points. Short answer:
 
 * **Join points: yes, added.** They fix a real problem: continuations were being copied, and
   the copies could grow exponentially.
+* **Recursive join points and no local functions: done** (following `CONTEXTS_ASSESSMENT.md`).
+  The local-function context is gone: a function is either global or, if it is a loop, a
+  recursive join point inside the statement that uses it. `while` is a derived form.
 * **An `Atom` layer under `PExpr`: no.** In this language it adds proof work and buys nothing.
   Details below.
 
@@ -20,13 +23,15 @@ LCond  ::= PExpr  with  isLoopCond = true        -- NF, not a literal (a loop te
 Expr   ::= ret NF                                     -- return
          | if Cond then Expr else Expr                -- case          (tail only)
          | let v := self NF* in Expr                  -- fixSelfCall   (carries `dec`)
-         | let v := f NF* in Expr                     -- fnCall        (local function)
          | let v := g NF* in Expr                     -- gCall         (global function)
-         | let v := while LCond do x := Expr from NF in Expr
-                                                      -- whileLoop     (carries R, wf, inv)
-         | letrec f := fix self xs. Expr in Expr      -- fix           (tail only)
          | join j (v : s) := Expr in Expr             -- join          (tail only)
-         | jump j NF                                  -- jump          (tail)
+         | joinrec j (x : s) [R, wf] := Expr in Expr  -- joinrec       (tail only; a loop)
+         | jump j NF                                  -- jump          (tail; a back edge
+                                                      --  carries the decrease)
+
+derived: let v := while LCond do x := NF from NF in Expr
+           = join k (v) := Expr in joinrec L (x) := (if c then jump L body else jump k x)
+             in jump L init                           -- Expr.whileLoop
 
 Program ::= global g₁ := fix self xs. Expr  …  global gₙ := fix self xs. Expr ;  Expr
              -- `PTerm`: global context (`Globals`) + main statement
@@ -39,7 +44,7 @@ grammar enforces an **optimised normal form** and a **global context** (sections
 
 ## Optimised normal form (`Core/Normal.lean`)
 
-Every call-free expression occurring in a statement (`ret`, the arguments of the three kinds
+Every call-free expression occurring in a statement (`ret`, the arguments of the two kinds
 of calls, `jump`) carries a proof `p.isNF = true`, and every `if` test a proof `c.isCond = true`.
 `isNF` is a Boolean function, so these proofs are `by decide` and are erased at runtime.
 `isNF` rejects every expression that the capture would still simplify:
@@ -67,31 +72,27 @@ the simplified programs, so each capture is checked against the Lean function en
 
 ## `while` loops (`PCL/Lang.lean`, `Core/While.lean`)
 
-`whileLoop s init c R wf inv hinit body k` is `let v := (while c do x := body from x := init) in
-k`. The loop state `x : s` is one value (a tuple for several loop variables). The node carries:
+`Expr.whileLoop s init hi c hc R wf inv hinit p hp step k` is
+`let v := (while c do x := p from x := init) in k`. It is a derived form (a definition, not a
+constructor): a join point `k` for the exit and a recursive join point for the loop, whose body
+is `if c then jump L p else jump k x` (`Expr.whileBody`). The loop state `x : s` is one value (a
+tuple for several loop variables). It carries:
 
 * a relation `R e` on the states, for each value `e` of the enclosing variables, with
   `wf : ∀ e, WellFounded (R e)`;
 * an invariant `inv e x`, with the proof `hinit` that the initial state satisfies it;
-* a body, which is a statement over `x` and the enclosing variables. Its path condition includes
-  the invariant and the test (`c = true`). Its postcondition is that the new state satisfies the
-  invariant and is `R`-below the old one. The `ret`s of the body prove it, like the `dec` proof
-  of a recursive call.
+* the next state `p`, a call-free expression over `x` and the enclosing variables, with the
+  proof `step` that, under the invariant and the test, it satisfies the invariant and is
+  `R`-below the old state (the back edge `jump L p` needs exactly this).
 
 The continuation `k` knows that `v` satisfies the invariant and that the test is false. So a
 loop gives Hoare-style partial correctness for free: `Tests/While.lean` shows this with a
-hand-written program whose postcondition follows from the loop's exit condition. The evaluator
-runs the loop with `WellFounded.fix` on the states. `whileFn_eq` is the loop equation and
-`whileFn_unique` says it has only one solution. `while_exits` and
-`while_nonterminating_unbuildable` (`PCL/Termination.lean`) say that every loop exits and that a
-loop whose test stays true cannot be written.
+hand-written program whose postcondition follows from the loop's exit condition.
+`eval_whileLoop` shows that the loop computes the Lean loop `whileWF` (`Core/While.lean`), and
+is proved from `joinFn_unique`.
 
-A loop binds its result, like a call, so it can occur in non-tail position. It does not need to
-be a `fix` in tail position. The test is a `PExpr` with `isLoopCond`: in normal form and not a
-literal. Unlike the test of an `if`, it may be a negation, since the body and the exit of a loop
-cannot be swapped. The body may call the local and global functions in scope. It may not call
-the enclosing recursive function, and it may not jump to a join point: a loop is a complete
-computation, like a call.
+The test is a `PExpr` with `isLoopCond`: in normal form and not a literal. Unlike the test of an
+`if`, it may be a negation (`Expr.whileBody` swaps the branches itself).
 
 **Lean side.** Lean's `while` (in `do` notation) is built on `Loop.forIn`, a `partial def`. It
 has no termination proof and cannot be unfolded in proofs, so the capture cannot reuse it. The
@@ -102,7 +103,7 @@ There is also its measure form `whileMeasure μ c body dec init`, with the notat
 wf_while (x, y) := init while c do body termination_by μ   -- (decreasing_by tac)?
 ```
 
-`#lean_wf_func_to_term` turns each such loop into one `whileLoop` node. It reuses the Lean
+`#lean_wf_func_to_term` turns each such loop into one `whileLoop`. It reuses the Lean
 relation, invariant and proofs (as functions of the environment), requires the test and the body
 to be call-free (the initial state may call), and proves agreement by rewriting both sides to
 `loopVal c body init`, the first iterate of `body` on which `c` is false (`whileWF_eq_loopVal`).
@@ -114,23 +115,28 @@ well-founded recursive function `defn gs f R wf body`, a non-recursive one using
 and the main statement. `Expr` has the list of global signatures `GL` as a parameter, and
 `gCall i args` calls the global function at index `i`. A global body may call the globals
 defined before it, so the context is ordered callees first. `Globals.env` evaluates each
-definition once with `fixFn`, and `Expr.eval` takes that environment.
+definition once with `fixFn`, and `Expr.eval` takes that environment. A recursive program is its
+function as the last global and a main statement that calls it (`PTerm.ofFix`).
+
+The capture collects the global context lazily: while it translates, the first call of a
+function that must be global registers it (after its own callees, so the context stays ordered
+callees first); a function called several times is captured once.
 
 The capture decides what goes in the global context from the attribute `@[inlinable]`:
 
 * a function marked `@[inlinable]` is inlined: a non-recursive one is replaced by its body, a
-  recursive one becomes a local `fix` at each call site;
+  tail-recursive one becomes a loop (recursive join point) at each call site (next section), and
+  a recursive one with non-tail self calls is a global function;
 * any other user-defined function is captured **once**, as an entry of the global context, and
   every call of it becomes a `gCall`;
-* functions with function parameters (specialised per call site), members of a mutual group,
-  and functions calling themselves inside a function argument are always captured at the call
-  site.
+* functions with function parameters are specialised per call site (a loop if the copy is
+  tail-recursive, otherwise one global per specialisation), a mutual group is one global
+  function with a tag parameter, and a function calling itself inside a function argument is
+  one global function together with the specialised argument.
 
 A `gCall` only knows the postcondition of its callee. When the termination proof of a caller
 needs the value computed by a helper (`logHalf n` calls itself on `half n`), the helper must be
-`@[inlinable]`; see `Tests/Globals.lean`, which also shows that sharing a recursive function in
-the global context gives a smaller program than inlining it at each call site
-(11 vs 19 nodes).
+`@[inlinable]`; see `Tests/Globals.lean`.
 
 `where` helpers: Lean compiles `def foo … where go …` into two top-level constants, `foo` and
 `foo.go`, and `foo.go` can be called from anywhere. The capture follows Lean: `foo.go` is a
@@ -143,18 +149,56 @@ Calls with known arguments: a call `g a₁ … aₙ` of a user function whose ar
 value (`foldCall?` in `Capture/Meta.lean`; the kernel computes the value). This holds for
 global functions and `@[inlinable]` ones alike, recursive or not. The function is then not
 needed for that call, so a function only called with known arguments is neither in the global
-context nor a local `fix`. `wf_agree` proves each equation `g a₁ … aₙ = v` with the same kernel
+context nor a loop. `wf_agree` proves each equation `g a₁ … aₙ = v` with the same kernel
 evaluation (the simplification procedure `wfFoldCalls`). Not evaluated: calls of the function
 being captured itself, of functions with a subtype result, proof parameters or function
 parameters, and calls inside proofs. `set_option wfLang.foldCalls false` turns it off.
 See `Tests/WhereFold.lean`.
+
+## Recursive join points (`PCL/Lang.lean`, `Capture/Stmt.lean`)
+
+```
+joinrec j (x : s) [R, wf] := body in m
+```
+
+* `body` runs in `s :: Γ`, under the path condition of the definition site and the
+  precondition `P e x`. It **keeps** the enclosing function (so it may make recursive calls of
+  it), the enclosing variables and the outer join points.
+* In `m` (the entry), `jump j p` needs only `P`.
+* Inside `body`, `j` is in scope with the precondition `P e v ∧ R e v x`: every back edge
+  `jump j v` proves that `v` is below the current parameter `x` along `R e`. No new `JScope`
+  constructor is needed: the decrease is part of the precondition of the entry seen from inside.
+* `R e` may depend on the enclosing variables `e`, with `wf : ∀ e, WellFounded (R e)`.
+* `Expr.eval` runs it with `(wf e).fix` (`joinFn`); `joinFn_eq` is its equation and
+  `joinFn_unique` says that it is the only solution. `joinrec_loop_unbuildable`
+  (`PCL/Termination.lean`): `joinrec j (x) := jump j x` cannot be written.
+
+**Tail-recursive `@[inlinable]` functions are inlined as loops.** A call `g args` followed by
+the rest of the computation `k` becomes
+
+```
+join K (v) := ⟦k v⟧ in
+joinrec L (x) [R] := ⟦body of g: tail calls g a ↦ jump L a, results r ↦ jump K r⟧ in
+jump L args
+```
+
+The parameter of `L` is the tuple of `g`'s parameters (`PCL.tupleTy`, read with `PCL.toEnv`),
+and `R` is Lean's well-founded relation for `g`. The decrease proofs of the back edges are found
+by the same tactic as for recursive calls. The loop is part of the caller's statement: it sees
+the caller's variables, its exit `jump K r` continues the caller, and `K` may call the
+enclosing recursive function. If the body of `g` turns out not to be translatable as a loop,
+`g` becomes a global function instead. `wf_agree` identifies each loop with
+`joinFn_unique`: the value of `L` on `x` is `K (g x)`, proved by unfolding `g` once, for every
+value of the join points in scope. `Tests/Loops.lean` pins the shapes (`loops`, `nglobals`):
+two calls give two loops, a loop can contain a loop, a loop body can call a global function, and
+bounded `for` loops (through the tail-recursive `rangeLoop`) are loops too.
 
 ## Join points (`PCL/Lang.lean`)
 
 **The problem.** A non-tail `if` containing a call, such as `(if c then f a else f b) + rest`, had
 to become `if c then (let v := f a; rest v) else (let v := f b; rest v)`, because `ite` must stay
 in tail position. `k` such `if`s in a row give `2^k` copies of the rest, and each copy has its
-own decrease proofs to elaborate. In `Tests/Joins.lean`, `seq2` and `seq3` have 15 and 27 nodes
+own decrease proofs to elaborate. In `Tests/Joins.lean`, `seq2` and `seq3` have 14 and 26 nodes
 with copies. The capture of `seq4` with copies did not finish elaborating within 4 000 000
 heartbeats when I tried it; that run is not part of the build.
 
@@ -165,7 +209,7 @@ join j (v : s) := ⟦rest⟧ in
 if c then (let v₁ := f a in jump j v₁) else (let v₂ := f b in jump j v₂)
 ```
 
-`seq2`, `seq3` and `seq4` have 16, 21 and 26 nodes with join points, 5 more per `if`. This is
+`seq2`, `seq3` and `seq4` have 15, 20 and 25 nodes with join points, 5 more per `if`. This is
 pinned in `Tests/Joins.lean`.
 
 **Typing.**
@@ -175,11 +219,11 @@ pinned in `Tests/Joins.lean`.
   may use. It also has the postcondition `Q` of its definition site, and a jump proves that `Q`
   implies the current postcondition.
 * The body runs under the path condition of the definition site plus `P`.
-* A join point is **not a function**:
+* A (non-recursive) join point is **not a function**:
   * it is not recursive, so it needs no `dec` proof;
   * it can only be jumped to in tail position;
-  * it is invisible inside `fix` bodies, because the body of a `fix` starts with
-    `JScope.nil`, so a join point cannot escape into another function.
+  * it is invisible inside global function bodies, which start with `JScope.nil`, so a join
+    point cannot escape into another function.
 
 **Why `JScope` has a weakening constructor.** My first version used `List (Join Γ t)` and
 `js.map (·.push s)` under binders. That type-checks, but the jumps then stay stuck behind
@@ -198,7 +242,7 @@ pinned in `Tests/Joins.lean`.
   `PCL/Termination.lean`.
 
 **Re-proved for the new grammar.**
-* `fixFn_eq` and `fixFn_unique`: a `fix` body now runs with no join points in scope.
+* `fixFn_eq` and `fixFn_unique`: a function body runs with no join points in scope.
 * `PTerm.ofFix_run`, and `Term.ofFix_eval` / `Term.ofFix_eval_post`.
 * `fix_body_reaches_base`, `fix_body_has_base_case` and `loop_unbuildable`. Here `firstCall`
   follows a `jump` into the join point's body; the information it needs is in `JFirst`.
@@ -213,8 +257,8 @@ pinned in `Tests/Joins.lean`.
   call produced it. Copying keeps it.
 * `set_option wfLang.joinPoints false` brings back the old behaviour everywhere; the comparison
   in `Tests/Joins.lean` uses it.
-* When the rest of the computation is tiny, copying is smaller: `nested` has 17 nodes with a
-  join point and 13 with copies.
+* When the rest of the computation is tiny, copying is smaller: `nested` has 16 nodes with a
+  join point and 12 with copies.
 
 ## Why no `Atom` layer (`Atom ::= x | lit`, operators only on atoms)
 
@@ -222,7 +266,7 @@ Full ANF restricts operator arguments to atoms and names every intermediate resu
 (`let x := a + b in …`). That matters when:
 
 1. **evaluation order or effects** must be explicit. Here `PExpr` is pure and total; the only
-   effect, calling a function, is already pulled out into `fixSelfCall` / `fnCall` / `gCall`;
+   effect, calling a function, is already pulled out into `fixSelfCall` / `gCall`;
 2. **there is a cost model or a machine to compile to**, such as registers or stack slots. There
    is neither here: the evaluator is denotational;
 3. **sharing**: a pure subexpression that is written twice is computed twice.
@@ -243,9 +287,12 @@ soundness or termination.
   would actually pay off.
 * **Join points in functions with postconditions**: give the join parameter a precondition
   recording the relevant postcondition (e.g. `∃ args, post args v`) instead of copying.
-* **Merging `fixSelfCall` into `fnCall`**, with `self` as a local function whose calls carry an
-  extra `dec` obligation. This would give a smaller grammar, but a local function and the
-  function being defined have different runtime meanings: the local function is total, while
+* **Merging `fixSelfCall` into `gCall`**, with `self` as a global function whose calls carry
+  an extra `dec` obligation. This would give a smaller grammar, but a global function and the
+  function being defined have different runtime meanings: the global function is total, while
   `self` is only defined below the current arguments (the `Handler`). Keeping two constructors
   keeps that difference visible in the types.
+* **Loops with calls in the `while` test or body**: a `wf_while` loop whose body calls a
+  function could be a general recursive join point too; the capture still requires the test and
+  the body of a `wf_while` to be call-free.
 * **Folding `PExpr.not` into `UnOp`**: cosmetic.

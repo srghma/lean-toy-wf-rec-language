@@ -40,7 +40,7 @@ def elemTyStx (listTy : Lean.Expr) : MetaM Stx := do
 
 /-- Capture of a function `f` whose body calls a function `g` with a function argument that
 calls `f` again (e.g. a `for` loop whose body calls `f`): `f` and the copy of `g` specialised to
-that argument are captured as **one** local recursive function with parameters
+that argument are captured as **one** global function with parameters
 `tag :: (f's parameters ++ g's lifted variables ++ g's parameters)`, where `tag = 0` selects
 `f` and `tag = 1` selects `g` (the unused parameters are padded with default values).  Its
 relation is `WFLang.hoRel`. -/

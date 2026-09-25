@@ -1,5 +1,17 @@
 # Assessment: removing the local-function context, and recursive join points
 
+> **Status: implemented.** Both changes were made after this note was written, so the
+> "nothing was changed" remark below describes the code at the time of the assessment.
+> * `fns`, `fix` and `fnCall` are gone from `PCL.Expr`; recursive programs are a global function
+>   plus a main statement calling it (`PTerm.ofFix`).
+> * Recursive join points are a separate constructor `joinrec s P R wf body m` (the "separate
+>   constructor" option of part 2). Instead of a new `JScope` entry, the body sees `j` through
+>   the ordinary `bind` entry whose precondition is `P e v ∧ R e v x`, so every back edge
+>   proves the decrease (`joinFn`, `joinFn_eq`, `joinFn_unique`, `joinrec_loop_unbuildable`).
+> * `whileLoop` is a derived form (`Expr.whileLoop`, `eval_whileLoop`).
+> * Tail-recursive `@[inlinable]` functions are inlined as loops inside the caller; recursive
+>   ones with non-tail calls are global functions (`Tests/Loops.lean`, `Tests/Globals.lean`).
+
 This note answers two design questions about `PCL.Expr` (`RequestProject/WFLang/PCL/Lang.lean`):
 
 1. Is there a reason **not** to remove the local-function context ("fnCtx") and split what it

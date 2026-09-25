@@ -123,7 +123,7 @@ theorem listHalve_agree : ∀ l, PCL.Term.eval listHalve_term l = listHalve l :=
 
 A `for i in [a:b]` loop (in `Id`) and `Nat.fold` are rewritten into `WFLang.rangeLoop`, a
 first-order well-founded function with a function parameter (the loop body), which is then
-specialised to the known loop body: a nested `fix` whose measure is `stop - i`. -/
+specialised to the known loop body: a loop (recursive join point) whose measure is `stop - i`. -/
 
 def forRange_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term forRange
 theorem forRange_agree : ∀ n, PCL.Term.eval forRange_term n = forRange n := by wf_agree
@@ -132,7 +132,7 @@ def usesFold_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term usesFol
 theorem usesFold_agree : ∀ n, PCL.Term.eval usesFold_term n = usesFold n := by wf_agree
 
 /-- A specialised call: the free variable `k` of the function argument becomes an extra
-parameter of the nested `fix` capturing `Tco.iter (fun x => x + k)`. -/
+parameter of the loop capturing `Tco.iter (fun x => x + k)`. -/
 def useIter_term : PCL.Term ⟨[.nat, .nat], .nat⟩ := #lean_wf_func_to_term useIter
 theorem useIter_agree : ∀ k n, PCL.Term.eval useIter_term k n = useIter k n := by wf_agree
 
@@ -140,7 +140,7 @@ theorem useIter_agree : ∀ k n, PCL.Term.eval useIter_term k n = useIter k n :=
 
 `f` calls a recursive function `g` with a function argument that calls `f` again (a `for` loop
 or `Nat.fold` whose body calls `f`, or a user-defined higher-order function).  `f` and the copy
-of `g` specialised to that argument are captured as **one** local recursive function, with a
+of `g` specialised to that argument are captured as **one** global function, with a
 tag parameter selecting `f` (tag `0`) or `g` (tag `1`).  Its relation is `WFLang.hoRel`: calls
 of `f` go down along `f`'s own relation, calls of `g` along `g`'s, entering `g` from `f x` is a
 decrease if every call of `f` that the function argument can make is below `x`, and the
@@ -246,7 +246,7 @@ open WFLang Gaps GapsPCL
 -- A recursive call under `fun` in `List.map` over `List.attach`: `List.map` is a library
 -- function (not specialised), and the elements of `attach` are subtypes whose property the
 -- termination proof needs.
-/-- info: rejected: #lean_wf_func_to_term: recursive call in an unsupported position -/
+/-- info: rejected: #lean_wf_func_to_term: call in an unsupported position -/
 #guard_msgs in
 #expect_reject (#lean_wf_func_to_term underLambda : PCL.Term ⟨[.nat], .nat⟩)
 

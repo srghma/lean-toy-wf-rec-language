@@ -9,8 +9,8 @@ A helper `go` declared in the `where` clause of `foo` is, in Lean, an ordinary t
 constant `foo.go`: it can be called from outside `foo` (`useGo` below).  The capture treats it
 exactly like any other user function: if it is not marked `@[inlinable]`, it is an entry of the
 global context of the program and `foo` calls it with `Expr.gCall`; if it is marked
-`@[inlinable]` (`where @[inlinable] go …`), it is inlined (a local `fix`) and does not appear in
-the global context.
+`@[inlinable]` (`where @[inlinable] go …`), it is inlined (as a loop, since it is
+tail-recursive) and does not appear in the global context.
 
 ## Calls with known arguments are evaluated
 
@@ -19,7 +19,7 @@ and operations on them, possibly other such calls) is evaluated when the functio
 and replaced by its value.  This applies to every user function, whether it is `@[inlinable]`
 or a global function, recursive or not, including `where` helpers.  A function that is only
 called with known arguments therefore does not appear in the program at all (neither in the
-global context nor as a local `fix`).  The value is computed by the kernel, and `wf_agree`
+global context nor as a loop).  The value is computed by the kernel, and `wf_agree`
 proves the equation `g a₁ … aₙ = v` by the same kernel evaluation.
 `set_option wfLang.foldCalls false` turns this off.
 -/
@@ -38,7 +38,7 @@ where
 /-- `foo.go` called from outside `foo`. -/
 def useGo (a b : Nat) : Nat := foo.go a b + foo.go b a
 
-/-- The same helper marked `@[inlinable]`: inlined into `fooI` (a local `fix`). -/
+/-- The same helper marked `@[inlinable]`: inlined into `fooI` (a loop). -/
 def fooI (n : Nat) : Nat :=
   go n 0
 where
@@ -124,21 +124,23 @@ def sumDigits_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term sumDigits
 theorem sumDigits_agree : ∀ n, Term.eval sumDigits_term n = sumDigits n := by wf_agree
 
 -- `foo`, `useGo` and `sumDigits` have one global function (`foo.go`, `sumDigits.go`); `foo.go`
--- captured on its own has none; `fooI` has none (its `go` is inlined as a local `fix`).
-/-- info: [1, 0, 1, 0, 1] -/
+-- captured on its own is one global function (itself, called by the main statement); `fooI`
+-- has none (its `go` is inlined as a loop).
+/-- info: [1, 1, 1, 0, 1] -/
 #guard_msgs in
 #eval [foo_term.nglobals, foo_go_term.nglobals, useGo_term.nglobals, fooI_term.nglobals,
   sumDigits_term.nglobals]
 
-/-- info: [1, 0, 2, 0, 1] -/
+/-- info: [1, 1, 2, 0, 1] -/
 #guard_msgs in
 #eval [foo_term.gcalls, foo_go_term.gcalls, useGo_term.gcalls, fooI_term.gcalls,
   sumDigits_term.gcalls]
 
-/-- info: [0, 1, 0, 1, 0] -/
+-- Loops: only `fooI` has one.
+/-- info: [0, 0, 0, 1, 0] -/
 #guard_msgs in
-#eval [foo_term.fixes, foo_go_term.fixes, useGo_term.fixes, fooI_term.fixes,
-  sumDigits_term.fixes]
+#eval [foo_term.loops, foo_go_term.loops, useGo_term.loops, fooI_term.loops,
+  sumDigits_term.loops]
 
 /-! ## Calls with known arguments -/
 
@@ -166,38 +168,39 @@ def otherTypes_term : Term ⟨[.bool, .int, .prod .nat .nat, .list .nat],
 theorem otherTypes_agree : ∀ b i p l,
     Term.eval otherTypes_term b i p l = otherTypes b i p l := by wf_agree
 
--- With the evaluation turned off, the calls stay (global functions and local `fix`es).
+-- With the evaluation turned off, the calls stay (global functions).
 set_option wfLang.foldCalls false in
 def allKnownOff_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term allKnown
 set_option wfLang.foldCalls false in
 theorem allKnownOff_agree : ∀ a, Term.eval allKnownOff_term a = allKnown a := by wf_agree
 
 -- Entries of the global context: `allKnown` has none (all its calls are evaluated), against
--- six for `noneKnown` and for `allKnown` with the evaluation turned off (`triple`, `sumTo`,
--- `foo.go`, `gcd`, `sumDigits.go` and `sumDigits`); `mixed` keeps `sumTo` for its unknown call;
+-- seven for `noneKnown` and for `allKnown` with the evaluation turned off (`triple`, `sumTo`,
+-- `foo.go`, `fact` (recursive, not tail-recursive), `gcd`, `sumDigits.go` and `sumDigits`);
+-- `mixed` keeps `sumTo` for its unknown call; `countDown` is itself a global function;
 -- `useAddSum` has `addSum` only (the body of `addSum` has the value of `sumTo 3`).
-/-- info: [0, 6, 1, 0, 0, 1, 0, 6] -/
+/-- info: [0, 7, 1, 0, 1, 1, 0, 7] -/
 #guard_msgs in
 #eval [allKnown_term.nglobals, noneKnown_term.nglobals, mixed_term.nglobals,
   nested_term.nglobals, countDown_term.nglobals, useAddSum_term.nglobals,
   otherTypes_term.nglobals, allKnownOff_term.nglobals]
 
 -- Calls of global functions.
-/-- info: [0, 6, 1, 0, 0, 2, 0, 6] -/
+/-- info: [0, 7, 1, 0, 1, 2, 0, 7] -/
 #guard_msgs in
 #eval [allKnown_term.gcalls, noneKnown_term.gcalls, mixed_term.gcalls, nested_term.gcalls,
   countDown_term.gcalls, useAddSum_term.gcalls, otherTypes_term.gcalls,
   allKnownOff_term.gcalls]
 
--- Local `fix` nodes: the inlined `fact` in `noneKnown` and `allKnownOff`, and `countDown`'s own.
-/-- info: [0, 1, 0, 0, 1, 0, 0, 1] -/
+-- Loops: none (no call of a tail-recursive `@[inlinable]` function is left).
+/-- info: [0, 0, 0, 0, 0, 0, 0, 0] -/
 #guard_msgs in
-#eval [allKnown_term.fixes, noneKnown_term.fixes, mixed_term.fixes, nested_term.fixes,
-  countDown_term.fixes, useAddSum_term.fixes, otherTypes_term.fixes, allKnownOff_term.fixes]
+#eval [allKnown_term.loops, noneKnown_term.loops, mixed_term.loops, nested_term.loops,
+  countDown_term.loops, useAddSum_term.loops, otherTypes_term.loops, allKnownOff_term.loops]
 
 -- Statement nodes (global bodies included): `allKnown` is a single `ret` of
 -- `a + 9 + 10 + 5 + 120 + 6 + 10`.
-/-- info: [1, 31, 31] -/
+/-- info: [1, 30, 30] -/
 #guard_msgs in
 #eval [allKnown_term.size, noneKnown_term.size, allKnownOff_term.size]
 

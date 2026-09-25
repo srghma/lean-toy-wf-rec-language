@@ -13,8 +13,9 @@ import RequestProject.WFLang.Core.While
   well-founded relation to environments (`pullBackRel`, `closedRel`, `closedFixOf`);
 * calls to other user functions: the attribute `@[inlinable]`; non-recursive `@[inlinable]`
   functions are inlined (`inlineCalls`), recursive `@[inlinable]` ones are reported
-  (`recCallees`) so that the capture turns them into nested `fix` nodes at the call site, and
-  the other ones are collected as global functions of the program (`collectGlobals`);
+  (`recCallees`) so that the capture turns them into loops at the call site (if they are
+  tail-recursive) or global functions, and the other ones are collected as global functions of
+  the program (`collectGlobals`);
   calls whose arguments are all known are evaluated first (`foldCall?`, `wfFoldCalls`);
 * the skeleton of the agreement tactic (`agreeTarget`, `agreeRec`, `rewriteCalleesWith`) and the
   tactics `wf_dec` (one decrease obligation) and `wf_close` (the goals left after unfolding).
@@ -60,12 +61,12 @@ structure FnSig where
   /-- is the result a subtype (i.e. is there a postcondition)? -/
   subtypeRet : Bool
   /-- number of *lifted* variables (free variables of the function arguments of a
-  specialised function), which come first in the parameters of the local recursive function -/
+  specialised function), which come first in the parameters of the global function -/
   nExtra : Nat := 0
   /-- positions of the specialised parameters (function, type and instance parameters) -/
   specPos : List Nat := []
   /-- for a member of a group of mutually recursive functions: its index in the group (the tag
-  passed as the first argument of the local recursive function capturing the group) -/
+  passed as the first argument of the global function capturing the group) -/
   tag : Option Nat := none
   /-- for a function that calls itself inside a function argument (captured together with the
   specialised function, see `Translate.HOInfo`): the number of padded parameters after its own -/
@@ -87,7 +88,7 @@ def isSpecBinder (d : Lean.Expr) (bi : BinderInfo) : MetaM Bool := do
 (`isSpecBinder`: function, type and instance parameters) are replaced by the values `spec` (in
 order), which are abstracted over the *lifted* variables (of types `extraTys`): the free
 variables of the function arguments at the call site.  The lifted variables become the first
-(fixed) parameters of the local recursive function capturing the specialised copy.  E.g.
+(fixed) parameters of the loop or global function capturing the specialised copy.  E.g.
 `Tco.iter Tco.mc91`, or `WFLang.rangeLoop (fun i s => s + i * n)` with `n` lifted. -/
 structure FnRef where
   name : Name
@@ -98,7 +99,7 @@ structure FnRef where
   /-- values of the specialised parameters, as `fun ys => v` over the lifted variables -/
   spec : Array Lean.Expr := #[]
   /-- if non-empty: the group of mutually recursive functions `name` belongs to, captured as one
-  local recursive function whose first parameter (a tag `i`) selects the function `group[i]` -/
+  global function whose first parameter (a tag `i`) selects the function `group[i]` -/
   group : Array Name := #[]
   deriving Inhabited
 
@@ -406,8 +407,9 @@ def mutualGroup? (fn : Name) : MetaM (Option (Array Name)) := do
 /-! ## Calls to other functions -/
 
 /-- `@[inlinable]` marks a function whose calls `#lean_wf_func_to_term` inlines: a
-non-recursive function is replaced by its body, a recursive one becomes a local recursive
-function (`fix`) at the call site.  The calls of the functions *not* marked `@[inlinable]` are
+non-recursive function is replaced by its body, a tail-recursive one becomes a loop (a
+recursive join point) at the call site, and a recursive one with non-tail self calls becomes a
+global function after all.  The calls of the functions *not* marked `@[inlinable]` are
 calls of **global functions**: each such function is captured once, as an entry of the global
 context of the program, and called from there (`Expr.gCall`). -/
 initialize inlinableAttr : TagAttribute ←
@@ -513,7 +515,7 @@ def isFoldableFn (c : Name) : MetaM Bool := do
 
 /-- **Evaluation of calls with known arguments.**  If `e` is a fully applied call `g a₁ … aₙ` of
 a user-defined function `g` (other than `fn`, whether `g` is `@[inlinable]`, a global function
-or a local recursive function) whose arguments are all known (`e` is a closed term), the value
+or a loop) whose arguments are all known (`e` is a closed term), the value
 of `e` as a literal.  The capture replaces such a call by its value (so `g` is neither inlined
 nor put in the global context for that call), and the agreement tactic proves the equation
 `g a₁ … aₙ = v` by kernel evaluation (`wfFoldCalls`).  Turned off by
@@ -677,15 +679,15 @@ def isGlobalFn (fn c : Name) : MetaM Bool := do
   if (← isWFRec c) && (← callsSelfInFnArg c) then return false
   return true
 
-/-- The recursive user-defined functions called in `e` (other than `fn`) that the capture turns
-into a local recursive function (`fix` node) at the call site: those marked `@[inlinable]`, and
-those that cannot be global functions (see `isGlobalFn`). -/
+/-- The recursive user-defined functions called in `e` (other than `fn`) that are not global by
+attribute: those marked `@[inlinable]` (loops at the call site if tail-recursive), and those
+that are handled specially (see `isGlobalFn`). -/
 def localRecCallees (fn : Name) (e : Lean.Expr) : MetaM (Array Name) := do
   (← userCallees fn e).filterM fun c => return (← isWFRec c) && !(← isGlobalFn fn c)
 
-/-- The user-defined functions called in `e` (other than `fn`) that are not inlined: the local
-recursive functions and the global functions.  Their values appear in the agreement proofs as
-`fixFn …` terms, identified by uniqueness (`rewriteCalleesWith`). -/
+/-- The user-defined functions called in `e` (other than `fn`) that are not inlined into a plain
+expression: the loops and the global functions.  Their values appear in the agreement proofs as
+`fixFn …` / `joinFn …` terms, identified by uniqueness (`rewriteCalleesWith`). -/
 def recCallees (fn : Name) (e : Lean.Expr) : MetaM (Array Name) := do
   (← userCallees fn e).filterM fun c => return (← isWFRec c) || !(← isInlinable c)
 
@@ -1065,7 +1067,7 @@ def tagSelect (t : Lean.Expr) (vs : Array Lean.Expr) : MetaM Lean.Expr := do
     v ← mkAppM ``ite #[← mkEq t (mkNatLit i), vs[i]!, v]
   return v
 
-/-- The relation of the local recursive function capturing a group of mutually recursive
+/-- The relation of the global function capturing a group of mutually recursive
 functions, over environments `(tag, xs)`, with its well-foundedness proof and the decreasing
 proofs of the calls.  Structural recursion on the same parameter: that parameter decreases.
 Well-founded recursion: Lean's relation on the domain `PSum D₀ (PSum D₁ …)` of the combined
@@ -1153,7 +1155,7 @@ def mkDisj : List Lean.Expr → Lean.Expr
   | [p] => p
   | p :: ps => mkApp2 (mkConst ``Or) p (mkDisj ps)
 
-/-- The relation (and its well-foundedness proof) of the local recursive function capturing
+/-- The relation (and its well-foundedness proof) of the global function capturing
 `f` (signature `fSig`, relation `Rf`) together with the copy `gRef` of `g` (signature `gSig`,
 relation `Rg`) specialised to function arguments that call `f`: `WFLang.hoRel` pulled back along
 `(tag, xs, ys, zs) ↦ if tag = 0 then inl xs else inr (ys, zs)`.  The predicate `Call x k`
@@ -1206,7 +1208,7 @@ def hoRelOf (fName : Name) (fSig : FnSig) (gRef : FnRef) (gSig : FnSig)
   let hwf ← mkAppOptM ``WFLang.hoRel_wf #[X, Y, K, Rf, Rg, lam, call, wff, wfg]
   return (← mkAppM ``InvImage #[hr, toSum], ← mkAppM ``InvImage.wf #[toSum, hwf])
 
-/-- `fnSolution` for the local recursive function capturing `f` with the specialised `gRef`:
+/-- `fnSolution` for the global function capturing `f` with the specialised `gRef`:
 `F (t, xs, ys, zs) _ = ⟨if t = 0 then f xs else g (spec ys) zs, _⟩`. -/
 def fnSolutionHO (fName : Name) (fSig : FnSig) (gRef : FnRef) (gSig : FnSig) :
     MetaM Lean.Expr := do
@@ -1269,7 +1271,7 @@ macro_rules
         | wf_solve
         | (and_intros <;> wf_solve)))
 
-/-- `wf_dec_tag [extra simp lemmas]`: `wf_dec` for the local recursive function capturing a group
+/-- `wf_dec_tag [extra simp lemmas]`: `wf_dec` for the global function capturing a group
 of mutually recursive functions, whose first parameter is a tag: the tag is made a variable and
 substituted by its value from the path condition, which selects the member (and its packing into
 Lean's domain). -/
@@ -1291,7 +1293,7 @@ macro_rules
         | wf_solve
         | (and_intros <;> wf_solve)))
 
-/-- `wf_dec_ho [extra simp lemmas]`: `wf_dec` for the local recursive function capturing a
+/-- `wf_dec_ho [extra simp lemmas]`: `wf_dec` for the global function capturing a
 function together with a specialised function whose function argument calls it (relation
 `WFLang.hoRel`): the tag is substituted by its value, which selects the case of `hoRel`. -/
 syntax (name := wfDecHO) "wf_dec_ho" (" [" ident,* "]")? : tactic
@@ -1497,19 +1499,29 @@ def fnSolution (f : FnRef) : MetaM Lean.Expr := do
         let F := mkApp4 (mkConst ``Subtype.mk [levelOne]) retD postX v pv
         mkLambdaFVars #[x, hx] F
 
-/-- Agreement proofs of programs with nested local recursive functions (captured callees).
-In the main goal, find a value `(fixFn wf body x hx).1` of a nested recursive node and replace
-it by `(F x hx).1`, where `F = fnSolution g` for one of the `callees` `g` with that signature.
-This is justified by the uniqueness lemma `fixFn_unique`, and the equation is proved by
+/-- Agreement proofs of programs with global functions and loops (captured callees).
+In the main goal, find a value `(fixFn wf body x hx).1` of a global function and replace it by
+`(F x hx).1`, where `F = fnSolution g` for one of the `callees` `g` with that signature
+(uniqueness lemma `fixFn_unique`); or a value `(joinFn wf body e g h je x hx).1` of a loop and
+replace it by `(je.1 (g x) _).1` (the rest of the computation `K` on the value of the callee `g`,
+uniqueness lemma `joinFn_unique`, stated for all `g h je`).  Each equation is proved by
 unfolding `g` once and running `step g`.  Repeats until no such value is left. -/
 partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees : Array Name)
-    (afterLoop : Tactic.TacticM Unit := pure ()) : Tactic.TacticM Unit := do
+    (afterLoop : Tactic.TacticM Unit := pure ()) (done : Array Lean.Expr := #[]) :
+    Tactic.TacticM Unit := do
   if (← Tactic.getGoals).isEmpty then return
   let tgt ← Tactic.withMainContext do instantiateMVars (← Tactic.getMainTarget)
-  let some fx := tgt.find? (fun x => x.isAppOfArity `WFLang.PCL.fixFn 11 ||
-      (x.isAppOfArity `WFLang.PCL.joinFn 19 && !x.appFn!.appFn!.hasLooseBVars)) | return
+  -- (`done`: the values already rewritten; they may remain inside proofs)
+  let some fx := tgt.find? (fun x => !done.contains x && (x.isAppOfArity `WFLang.PCL.fixFn 11 ||
+      (x.isAppOfArity `WFLang.PCL.joinFn 19 &&
+        (x.getAppArgs.extract 0 14).all (!·.hasLooseBVars)))) | return
   let isLoop := fx.isAppOf `WFLang.PCL.joinFn
-  let fnStx ← Tactic.withMainContext do exprToSyntax fx.appFn!.appFn!
+  let fnStx ← Tactic.withMainContext do
+    if isLoop then `(_) else exprToSyntax fx.appFn!.appFn!
+  -- for a loop: the arguments of `joinFn` before the proof of the path condition, the handler
+  -- and the join points (these may depend on bound variables: the equation is stated for all)
+  let fargs ← Tactic.withMainContext do
+    if isLoop then (fx.getAppArgs.extract 0 14).mapM fun a => exprToSyntax a else pure #[]
   -- the candidates: the recursive callees, and the specialised copies called in the goal
   let specs ← Tactic.withMainContext do specRefsIn .anonymous tgt
   let mut cands : Array FnRef := #[]
@@ -1538,15 +1550,18 @@ partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees :
       -- for a loop: the value of the join point on `x` is the rest of the computation (the join
       -- point `K`, the first value of the join points in scope at the loop) on the callee's
       -- value
-      let F ← if isLoop then do
-          let je ← Tactic.withMainContext do exprToSyntax (fx.getArg! 16)
-          let ps ← Tactic.withMainContext do exprToSyntax (mkTyList argTys)
+      let ps ← Tactic.withMainContext do exprToSyntax (mkTyList argTys)
+      let je := mkIdent `wfLpJ
+      let F ← if isLoop then
           `(fun x _ => ($je).1 (($sol) ($(mkIdent `WFLang.PCL.toEnv) $ps x) trivial).1 trivial)
         else pure sol
+      let jf := mkIdent `WFLang.PCL.joinFn
+      let stmtStx ← if isLoop then
+          `(∀ g h $je:ident x hx, (@$jf $fargs* g h $je x hx).1 = ($F x hx).1)
+        else `(∀ x hx, ($fnStx x hx).1 = ($F x hx).1)
       Tactic.withMainContext do
         let hTy ← Term.withoutErrToSorry do
-          let t ← Term.elabTerm (← `(∀ x hx, ($fnStx x hx).1 = ($F x hx).1))
-            (some (mkSort .zero))
+          let t ← Term.elabTerm stmtStx (some (mkSort .zero))
           Term.synthesizeSyntheticMVarsNoPostponing
           instantiateMVars t
         let pf ← mkFreshExprSyntheticOpaqueMVar hTy
@@ -1554,16 +1569,12 @@ partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees :
           if isLoop then
             -- (all the arguments of `joinFn` explicitly: the postcondition of the loop cannot
             -- be inferred from `F`)
-            let fargs ← Tactic.withMainContext do
-              (fx.getAppArgs.extract 0 17).mapM fun a => exprToSyntax a
-            let lem := Syntax.mkApp (mkIdent `WFLang.PCL.joinFn_unique) #[]
-            let lemAt ← `(@$(⟨lem.raw⟩) $fargs* $F)
-            -- the join points in scope (the rest of the computation) are arbitrary: generalize
-            -- them, so that loops in the rest of the computation are not unfolded here
-            let je ← Tactic.withMainContext do exprToSyntax (fx.getArg! 16)
+            -- (the join points in scope, i.e. the rest of the computation, are arbitrary: loops
+            -- in the rest of the computation are not unfolded here)
+            let lem := mkIdent `WFLang.PCL.joinFn_unique
             Tactic.evalTactic (← `(tactic| (
-              refine $lemAt ?_
-              try generalize $je:term = J
+              intro g h $je:ident
+              refine @$lem $fargs* g h $je $F ?_
               intro $(mkIdent `wfLpx):ident hx
               dsimp only)))
             -- the components of the tuple become variables
@@ -1609,7 +1620,7 @@ partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees :
       Tactic.evalTactic (← `(tactic| (simp only [$h:ident] at *); try clear $h))
       -- after a loop: evaluate the rest of the computation (which may contain further nodes)
       if isLoop then afterLoop
-      return ← rewriteCalleesWith step callees afterLoop
+      return ← rewriteCalleesWith step callees afterLoop (done.push fx)
     catch _ =>
       restoreState saved
   throwError "wf_agree: could not identify the function computed by{indentExpr fx.appFn!}"

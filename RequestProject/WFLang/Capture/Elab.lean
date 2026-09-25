@@ -399,20 +399,22 @@ def hoRefOf? (f : FnRef) : TermElabM (Option FnRef) := do
     hoRefIn? f c rhs
 
 mutual
-/-- Replace every value `(fixFn wf body x hx).1` of a nested `fix` node capturing a recursive
-callee in the main goal by the callee's value (`rewriteCalleesWith`, uniqueness lemma
-`fixFn_unique`). -/
+/-- Replace every value of a global function (`fixFn …`) or of a loop (`joinFn …`) capturing a
+callee in the main goal by the callee's value (`rewriteCalleesWith`, uniqueness lemmas
+`fixFn_unique`, `joinFn_unique`). -/
 partial def rewriteCallees (callees : Array Name) : Tactic.TacticM Unit := do
   rewriteHOCallees callees
-  rewriteCalleesWith calleeStep callees
+  rewriteCalleesWith (calleeStep callees) callees
     (Tactic.evalTactic (← `(tactic| all_goals try $(← pclSimp):tactic)))
 
-/-- The rest of the proof that the callee `g` satisfies the equation of the body of its `fix`
-node, after unfolding `g` once. -/
-partial def calleeStep (g : FnRef) : Tactic.TacticM Unit := do
+/-- The rest of the proof that the callee `g` satisfies the equation of the body of its node,
+after unfolding `g` once.  (The functions identified in this proof: those of the enclosing
+proof `outer`, e.g. the global functions called in the body of a loop, and `g`'s callees.) -/
+partial def calleeStep (outer : Array Name) (g : FnRef) : Tactic.TacticM Unit := do
   unfoldInlined g
   Tactic.evalTactic (← `(tactic| all_goals $(← pclSimp):tactic))
-  rewriteCallees (← calleeInfo g.name).2
+  let inner := (← calleeInfo g.name).2
+  rewriteCallees (outer.foldl (fun acc n => if acc.contains n then acc else acc.push n) inner)
   Tactic.evalTactic (← `(tactic| wf_close))
 
 /-- `rewriteCallees` for the callees that call themselves inside a function argument: their
@@ -493,7 +495,7 @@ end
 
 /-- The agreement proof for a function `f` captured together with the copy `gRef` of a function
 specialised to a function argument that calls `f` (`HOInfo`): the program is one call (tag `0`)
-of the local recursive function, which computes
+of the global function capturing both, which computes
 `F (t, xs, ys, zs) = if t = 0 then f xs else g (spec ys) zs` (`fnSolutionHO`) by uniqueness
 (`fixFn_unique`, `hoEqProof`). -/
 def hoAgree (f gRef : FnRef) (t : Ident) : Tactic.TacticM Unit := do
@@ -512,7 +514,7 @@ def hoAgree (f gRef : FnRef) (t : Ident) : Tactic.TacticM Unit := do
 
 @[tactic wfAgree] def evalWfAgree : Tactic.Tactic := fun _ => do
   let (t, f, eqDef, _) ← agreeTarget "wf_agree"
-  -- the functions whose values are identified in the proof: the local recursive callees and
+  -- the functions whose values are identified in the proof: the loop callees and
   -- the global functions (also those called only from the function arguments of a
   -- specialised `f`)
   let callees := (← globalsOf f).foldl (fun acc g => if acc.contains g then acc else acc.push g)

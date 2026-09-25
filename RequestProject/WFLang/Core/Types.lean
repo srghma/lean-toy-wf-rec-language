@@ -281,7 +281,7 @@ theorem preRel_wf {Γ : List Ty} {K : Type} {D : Sort _} {pre : Env Γ → Prop}
 
 /-! ## Relations for recursion through a function argument -/
 
-/-- The relation of the local recursive function that captures a Lean function `f` together
+/-- The relation of the global function that captures a Lean function `f` together
 with the copy of a function `g` specialised to a function argument which itself calls `f`
 (e.g. `f (n+1) = g (fun r => f n r) …`, as in `for` loops whose body calls `f`).  States are
 `Sum.inl x` (a call `f x`) and `Sum.inr y` (a call of the specialised `g`, whose lifted

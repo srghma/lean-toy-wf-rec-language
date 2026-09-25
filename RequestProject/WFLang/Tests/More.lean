@@ -101,7 +101,7 @@ theorem mc91TR_agree : ∀ n, Term.eval mc91TR_term n = Tco.mc91TR n := by wf_ag
 
 /-! ### Mutual recursion
 
-A group of mutually recursive functions is captured as **one** local recursive function whose
+A group of mutually recursive functions is captured as **one** global function whose
 first parameter is a tag selecting the member; a call of the `i`-th member is a recursive call
 with tag `i`.  The relation is the one Lean built for the group, pulled back along
 `(i, xs) ↦ PSum.inl/inr xs`. -/

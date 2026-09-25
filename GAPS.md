@@ -7,22 +7,23 @@ Each captured function has an agreement theorem proved by `wf_agree` and a runti
 `lake build` fails.
 
 The soundness argument is the same for every construct. The agreement proof (`wf_agree`) relies
-only on the uniqueness of the `fix` solution (`fixFn_unique`) and on `f.eq_def`. The
+only on the uniqueness of the solution of each recursive equation (`fixFn_unique` for global
+functions, `joinFn_unique` for loops) and on `f.eq_def`. The
 well-founded relation and the decreasing proofs are still the ones Lean built, pulled back to
 the program's parameters (or combined from Lean's relations, for the two new encodings below:
 mutual recursion and recursion through a function argument).
 
-The language stays in **strict A-normal form**, now also for local functions: arithmetic,
-comparisons, `bool_eq`, `&&`, `||`, `!`, pairs and list operations are call-free `PExpr`s; the
-result of every call is bound to a new variable (`fixSelfCall` for a recursive call,
-`fnCall` for a call of a local function); and the two compound statements occur only in tail
-position: `ite` (case) and `fix`, which is a `letrec f := fix … in rest` whose scope is the rest
-of the computation. Loops and folds are `fix` nodes too, so they are also in tail position. A
-Lean `if`/`match` with a call in non-tail position is captured with a join point
+The language stays in **strict A-normal form**: arithmetic, comparisons, `bool_eq`, `&&`, `||`,
+`!`, pairs and list operations are call-free `PExpr`s; the result of every call is bound to a
+new variable (`fixSelfCall` for a recursive call, `gCall` for a call of a global function); and
+the compound statements occur only in tail position: `ite` (case), `join` and `joinrec` (a
+loop). A Lean `if`/`match` with a call in non-tail position is captured with a join point
 (`join j (v) := rest in if c then (…; jump j a) else (…; jump j b)`, see `GRAMMAR.md`; the rest
 of the computation is copied into both branches instead when a call in scope has a
-postcondition), and a call of a recursive function or a loop in non-tail
-position becomes `fix g := … in let v := g args in k`.
+postcondition). A call of a tail-recursive `@[inlinable]` function (and of a specialised
+tail-recursive function, such as the loop of a `for`) in any position becomes a loop:
+`join K (v) := k in joinrec L (x) := body in jump L args`; other recursive functions are global
+functions, called with `gCall`.
 
 ## 1. Capture-only gaps (the grammar could already express them): all closed
 
@@ -50,13 +51,13 @@ position becomes `fix g := … in let v := g args in k`.
 | `intDown`, `intSteps` | `Ty.int`, with `+ - * / %`, `<`, `≤`, negation, `Int.toNat`, `Int.natAbs`, the cast `Nat → Int`; Lean's relation (`termination_by n.toNat`) is reused |
 | `fibPair`, `swapSteps` | `Ty.prod s t`, pairing, projections, `match` on pairs; pairs as parameters and results |
 | `listSum`, `listRev`, `listPairs`, `listHalve` | `Ty.list t`, `[]`, `::`, `++`, `head`, `tail`, `isNil`, `length`; `match` on lists (also nested patterns) becomes `isNil` tests; structural recursion on lists uses the length |
-| `boundedRes`, `nestedBound` | **postconditions**: a subtype result `{r // Q r}` becomes the postcondition `Q` of the `fix` node. Each `ret` proves it, and after each recursive call it is added to the path condition, so a decrease proof may use it (`nestedBound`'s second call needs `r ≤ n - 1` from the first). `PTerm.run_post`: every run satisfies it |
+| `boundedRes`, `nestedBound` | **postconditions**: a subtype result `{r // Q r}` becomes the postcondition `Q` of the function. Each `ret` proves it, and after each recursive call it is added to the path condition, so a decrease proof may use it (`nestedBound`'s second call needs `r ≤ n - 1` from the first). `PTerm.run_post`: every run satisfies it |
 
 ## 4. Higher-order code
 
 | example | status | how |
 |---|---|---|
-| `forRange`: `for i in [0:n] do s := s + i` | captured | the `for` loop (in `Id`, over a range, always continuing) is rewritten into `WFLang.rangeLoop` (`Core/Loops.lean`), a first-order well-founded function whose function parameter is then *specialised* to the loop body: a nested `fix` with measure `stop - i` |
+| `forRange`: `for i in [0:n] do s := s + i` | captured | the `for` loop (in `Id`, over a range, always continuing) is rewritten into `WFLang.rangeLoop` (`Core/Loops.lean`), a first-order tail-recursive well-founded function whose function parameter is then *specialised* to the loop body: a loop (recursive join point) with measure `stop - i` |
 | `usesFold`: `Nat.fold n (fun i _ acc => …) init` | captured | rewritten into `rangeLoop` in the same way |
 | `Tco.iter`, `Tco.hyperLoop` (function parameters) | captured when specialised | `#lean_wf_func_to_term (Tco.iter Tco.mc91)` captures the copy specialised to a closed function argument; a call with a function argument inside another function is specialised at the call site, the free variables of the argument becoming extra (fixed) parameters (`useIter`: `Tco.iter (fun x => x + k) n 0`) |
 | `Tco.hyperWhile` (a `for` loop whose body calls `hyperWhile`), `Tco.hyperTCO` (`hyperLoop (hyperTCO n a) …`), `Tco.ack2` (`ackInner (ack2 m)`, a function result), `loopRec`, `foldRec`, `viaApplyN` | captured | **recursion through a function argument**, see below |
@@ -65,7 +66,7 @@ position becomes `fix g := … in let v := g args in k`.
 
 **Recursion through a function argument.** When `f` calls a recursive function `g` with a
 function argument that calls `f` again, `f` and the copy of `g` specialised to that argument are
-captured as **one** local recursive function. Its parameters are
+captured as **one** global function. Its parameters are
 `tag :: f's parameters ++ g's lifted variables ++ g's parameters` (the part not used by a call
 is padded with default values); `tag = 0` runs `f`'s body and `tag = 1` runs `g`'s. Its relation
 is `WFLang.hoRel` (`Core/Types.lean`, proved well-founded by `hoRel_wf`, no axioms), built from
@@ -87,8 +88,8 @@ The agreement proof shows that the node computes
 
 | example | how |
 |---|---|
-| mutual recursion: `More.Mutual.isEven`/`isOdd` (structural), `downA`/`downB` (well-founded, `termination_by`), `mod3a`/`mod3b`/`mod3c` (three functions) | one `fix` with a tag parameter selecting the member; a call of the `i`-th member is a recursive call with tag `i`; the relation is Lean's relation for the group (on the `PSum` domain of `f._mutual`), pulled back along `(i, xs) ↦ PSum.inl/inr xs` (for structural groups: the common recursive parameter decreases) |
-| a proof precondition: `Tco.boom (n) (h : Safe n)` | a `fix` carries a precondition `pre`, which is part of the path condition of its body; every call proves it for its arguments. The program is a `PTerm` with precondition `Safe n`, run as `PTerm.run boom_term (n, ()) h` |
+| mutual recursion: `More.Mutual.isEven`/`isOdd` (structural), `downA`/`downB` (well-founded, `termination_by`), `mod3a`/`mod3b`/`mod3c` (three functions) | one global function with a tag parameter selecting the member; a call of the `i`-th member is a recursive call with tag `i`; the relation is Lean's relation for the group (on the `PSum` domain of `f._mutual`), pulled back along `(i, xs) ↦ PSum.inl/inr xs` (for structural groups: the common recursive parameter decreases) |
+| a proof precondition: `Tco.boom (n) (h : Safe n)` | a global function carries a precondition `pre`, which is part of the path condition of its body; every call proves it for its arguments. The program is a `PTerm` with precondition `Safe n`, run as `PTerm.run boom_term (n, ()) h` |
 
 ## 6. Still not supported
 

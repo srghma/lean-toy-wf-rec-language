@@ -53,11 +53,11 @@ def boolEx_term : Term ⟨[.bool, .bool, .nat, .nat], .prod .bool .nat⟩ :=
   #lean_wf_func_to_term boolEx
 theorem boolEx_agree : ∀ b c x y, Term.eval boolEx_term b c x y = boolEx b c x y := by wf_agree
 
--- `optEx` is captured as
--- `fix f n. if n == 0 then ret 5 else if n == 1 then ret (n + 1) else let v := f (n - 1) in ret v`
--- (9 nodes: the `fix`, the call `f n`, its `ret`, and the 6 nodes of the body); `listEx` and
--- `boolEx` are a single `ret`.
-/-- info: [9, 1, 1] -/
+-- `optEx` is captured as the global function
+-- `f n := if n == 0 then ret 5 else if n == 1 then ret (n + 1) else let v := f (n - 1) in ret v`
+-- and the main statement `let v := f n in ret v` (8 nodes: the call `f n`, its `ret`, and the
+-- 6 nodes of the body); `listEx` and `boolEx` are a single `ret`.
+/-- info: [8, 1, 1] -/
 #guard_msgs in
 #eval [optEx_term.size, listEx_term.size, boolEx_term.size]
 

@@ -1,3 +1,39 @@
+# Summary of changes for run d471d10f-3534-4a2b-a9ff-b165b29060dc
+I implemented the proposal in `CONTEXTS_ASSESSMENT.md`, including the part you highlighted: tail-recursive `@[inlinable]` functions are now inlined as loops inside the caller. The full `lake build` passes, including every test file and every agreement proof, and so does `lake build wfbench`. The project contains no `sorry`. The new theorems I spot-checked (the loop soundness results, `eval_whileLoop` and the loop agreement theorems) use only `propext` and `Quot.sound`.
+
+**Language (`PCL/Lang.lean`)**
+- **No more local functions:** `fns`, `fix` and `fnCall` are removed. Every function is either a global function or a loop. A recursive program is now its function as the last global plus a main statement that calls it (`PTerm.ofFix`, `PTerm.ofFix_run`, `Term.ofFix_eval`).
+- **Recursive join points:** the new constructor `joinrec s P R wf body m` is a loop. Its relation `R` can depend on the enclosing variables (`wf : ∀ e, WellFounded (R e)`). The body keeps the enclosing variables, the enclosing function and the outer join points. Inside the body, the loop's own precondition includes the decrease, so every back edge must prove it. The proposal suggested a new `JScope` entry for this; the precondition approach made that unnecessary.
+- **Soundness:** `joinFn_eq` (the loop satisfies its equation) and `joinFn_unique` (it is the only solution). `joinrec_loop_unbuildable` shows a loop that jumps straight back to itself cannot be written. The base-case theorems in `PCL/Termination.lean` now also follow jumps through loops.
+- **`while` is a derived form:** `Expr.whileLoop` is a `join` for the exit plus a `joinrec` for the loop. `eval_whileLoop` proves that it computes the Lean loop `whileWF`.
+
+**Capture: loops inside the caller (`Capture/Stmt.lean`, `Translate.lean`, `Elab.lean`)**
+- A call of a tail-recursive `@[inlinable]` function `g` becomes `join K (v) := rest in joinrec L (x) [R] := body of g in jump L args`. Tail calls of `g` become back edges, and results jump to `K`. The loop reads the caller's variables, and `K` can call the enclosing recursive function.
+- Recursive `@[inlinable]` functions whose self calls are not all tail calls become global functions. If a body can't be translated as a loop, the capture falls back to a global function.
+- The global context is collected lazily: each global function is captured once, ordered callees first.
+- `wf_agree` proves each loop correct with `joinFn_unique`, for any values of the join points in scope.
+
+**Tests**
+- **New file `Tests/Loops.lean`:** each case has its agreement theorem, and the number of loops, the number of global functions and runtime results are pinned. The cases are:
+  - two calls of the same function, giving two loops;
+  - a loop whose continuation makes the enclosing recursive call;
+  - a loop inside a branch;
+  - a loop with two exits;
+  - a loop nested inside another loop;
+  - a loop result used in an `if` test;
+  - a loop whose body calls a global function.
+- **Also loops now:** `for` loops, `Nat.fold`, the specialised `Tco.iter`, and `fooI`'s `where @[inlinable] go` (pinned).
+- **Updated pins:** node counts in `Globals`, `WhereFold`, `Joins`, `Normal` and `While`, and `fixes`/`whiles` became `loops`/`nglobals`. I rewrote the hand-written `while` program for the new signature.
+- **One changed rejection message:** `ackNoDataStructure` is still rejected, but the message now reads "call in an unsupported position".
+
+**Known limitation.** Each loop iteration uses some stack in the evaluator. In a single interpreter run, `diagonalWhile` with about 2,200 iterations aborted, so I restricted its runtime check to `n < 40` (about 1,000 iterations). This is documented in `STACK_OVERFLOW.md` and `UNSUPPORTED.md`.
+
+**Docs.** `README.md`, `GRAMMAR.md` (new section on recursive join points), `GAPS.md`, `UNSUPPORTED.md`, `STACK_OVERFLOW.md` and the docstrings are updated. I added a short "Status: implemented" note at the top of `CONTEXTS_ASSESSMENT.md`; the rest of that file is unchanged.
+
+**Properties table.** I updated `Expr`, the `while` soundness entry (now `eval_whileLoop`), the base-case entry and two capture entries. I added proved entries for loop soundness, the unbuildable looping join point, and inlining tail-recursive functions as loops. The table was too long for me to list in full, so there may be older rows I couldn't locate that still mention `fix` or the old `while` theorems.
+
+All work is committed.
+
 # Summary of changes for run f70d706a-08ba-4ca8-9107-758881c43445
 I wrote `UNSUPPORTED.md`, an assessment of what the language and `#lean_wf_func_to_term` still can't do. I also added a test file, `RequestProject/WFLang/Tests/Unsupported.lean`, that pins each new rejection with `#guard_msgs`: if the capture starts accepting one of those functions, `lake build` fails. The full `lake build` passes and the new test file has no `sorry`. Entries I didn't re-test are marked "[documented]" in the file, meaning they are taken from the earlier notes.
 

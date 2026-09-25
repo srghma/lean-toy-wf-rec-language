@@ -97,3 +97,15 @@ The cost comes from the evaluator having to return into `k` after every call.
   and heap-allocated frames for real nesting (`ack`). Termination would have to be proved with
   a measure built from `R` and the continuation stack, and it would need a new proof that the
   machine agrees with `Expr.eval`. That is a substantial change to `Lang.lean`.
+
+## Recursive join points (loops)
+
+Loops are recursive join points (`joinrec`, including every `wf_while` loop, which is a derived
+form). The evaluator runs a loop with `WellFounded.fix` on the loop parameter, and each back edge
+`jump L x` calls the closure of the loop body, so an iteration also uses stack: in the
+interpreter, a few frames per iteration (`Expr.eval`, `JVar.get`, `WellFounded.fixC` and its
+lambda). `Tests/While.lean` runs `diagonalWhile m n` only for `n < 40` (about 1 000 iterations)
+for this reason; with `n` up to 59 (about 2 200 iterations) the interpreter aborted with the
+`deep recursion` error when this was tried (a single run, not a proof). The syntax now marks
+tail recursion explicitly (`jump` to a `joinrec`), which is what an explicit-stack evaluator
+would need in order to run loops in constant stack.

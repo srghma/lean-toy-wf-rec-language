@@ -7,16 +7,19 @@ import RequestProject.WFLang.Tests.MoreChecks
 `g`'s attribute:
 
 * `g` marked **`@[inlinable]`**: the call is inlined.  A non-recursive `g` is replaced by its
-  body; a recursive `g` becomes a local recursive function (`fix`) at the call site (one copy
-  per call site).
+  body; a tail-recursive `g` becomes a loop (a recursive join point) at the call site, which
+  reads the caller's variables and jumps to the rest of the caller's computation when it is
+  done (see `Tests/Loops.lean`).  A recursive `g` with non-tail self calls (`sumToI` below)
+  cannot be a loop: it becomes a global function, like a function without the attribute.
 * `g` **not** marked `@[inlinable]`: `g` is a **global function** of the program.  It is
   captured once, as an entry of the global context (`PTerm.globals`, a `Globals` list whose
   entries may call the entries before them), and each call is `Expr.gCall i args` where `i`
   is `g`'s index in the global context.
 
-Exceptions (always captured at the call site, whatever the attribute): functions with
-function parameters (specialised to the function passed at each call), members of a group of
-mutually recursive functions, and functions calling themselves inside a function argument.
+Functions with function parameters are specialised to the function passed at each call (one
+global function per specialisation); a group of mutually recursive functions is one global
+function (with a tag selecting the member).  The captured function itself, when it is
+recursive, is also a global function, and the main statement calls it.
 
 A call of a global function only knows the postcondition of the callee (its subtype
 property, if any), not its definition.  When a termination proof of the caller needs the
@@ -24,7 +27,7 @@ value computed by a non-recursive helper (e.g. `half n < n`), the helper must be
 `@[inlinable]` (`logHalf` below).
 
 The measures `PTerm.nglobals` (entries of the global context), `PTerm.gcalls` (calls of global
-functions), `PTerm.fixes` (local `fix` nodes) and `PTerm.size` (statement nodes, global
+functions), `PTerm.loops` (recursive join points) and `PTerm.size` (statement nodes, global
 bodies included) are pinned below.
 -/
 
@@ -40,7 +43,8 @@ def triple (n : Nat) : Nat := 3 * n
 def sumTo (n : Nat) : Nat := if n = 0 then 0 else n + sumTo (n - 1)
 termination_by n
 
-/-- The same function, inlined (a local `fix` at each call site). -/
+/-- The same function, marked `@[inlinable]`: its self call is not a tail call, so it is still
+a global function. -/
 @[inlinable] def sumToI (n : Nat) : Nat := if n = 0 then 0 else n + sumToI (n - 1)
 termination_by n
 
@@ -48,8 +52,8 @@ termination_by n
 five calls. -/
 def useGlobals (a b : Nat) : Nat := sumTo a + sumTo b + sumTo (triple a) + triple b
 
-/-- The same with the inlined functions: `tripleI` disappears, and each call of `sumToI` gets
-its own local `fix`. -/
+/-- The same with the inlinable functions: `tripleI` disappears, and `sumToI` (not
+tail-recursive) is a global function called three times. -/
 def useInlined (a b : Nat) : Nat := sumToI a + sumToI b + sumToI (tripleI a) + tripleI b
 
 /-- A global function calling another global function: the global context is ordered, callees
@@ -128,31 +132,32 @@ theorem gcdTwice_agree : ∀ m n, Term.eval gcdTwice_term m n = gcdTwice m n := 
 
 /-! ## The shape of the programs -/
 
--- Entries of the global context: `useGlobals` has `sumTo` and `triple`, `useInlined` none,
--- `useChain` has `triple` and `sumTriple`, `countTriples` and `downBy` one each, `logHalf` none
--- (`half` is inlined), `gcdTwice` one (`gcd`).
-/-- info: [2, 0, 2, 1, 0, 1, 1] -/
+-- Entries of the global context: `useGlobals` has `sumTo` and `triple`, `useInlined` `sumToI`,
+-- `useChain` has `triple` and `sumTriple`, `countTriples` has `triple` and itself, `logHalf`
+-- itself (`half` is inlined), `downBy` `pred'` and itself, `gcdTwice` `gcd`.
+/-- info: [2, 1, 2, 2, 1, 2, 1] -/
 #guard_msgs in
 #eval [useGlobals_term.nglobals, useInlined_term.nglobals, useChain_term.nglobals,
   countTriples_term.nglobals, logHalf_term.nglobals, downBy_term.nglobals,
   gcdTwice_term.nglobals]
 
--- Calls of global functions (`sumTriple`'s body calls `triple` once).
-/-- info: [5, 0, 3, 1, 0, 1, 2] -/
+-- Calls of global functions (`sumTriple`'s body calls `triple` once; the recursive programs
+-- `countTriples`, `logHalf` and `downBy` call themselves once from the main statement, and their
+-- recursive calls are self calls, not global calls).
+/-- info: [5, 3, 3, 2, 1, 2, 2] -/
 #guard_msgs in
 #eval [useGlobals_term.gcalls, useInlined_term.gcalls, useChain_term.gcalls,
   countTriples_term.gcalls, logHalf_term.gcalls, downBy_term.gcalls, gcdTwice_term.gcalls]
 
--- Local `fix` nodes: one per call of the inlined `sumToI` (the recursive programs
--- `countTriples`, `logHalf`, `downBy` have one `fix` each: their own).
-/-- info: [0, 3, 0, 1, 1, 1, 0] -/
+-- Loops: none of these programs calls a tail-recursive `@[inlinable]` function.
+/-- info: [0, 0, 0, 0, 0, 0, 0] -/
 #guard_msgs in
-#eval [useGlobals_term.fixes, useInlined_term.fixes, useChain_term.fixes,
-  countTriples_term.fixes, logHalf_term.fixes, downBy_term.fixes, gcdTwice_term.fixes]
+#eval [useGlobals_term.loops, useInlined_term.loops, useChain_term.loops,
+  countTriples_term.loops, logHalf_term.loops, downBy_term.loops, gcdTwice_term.loops]
 
--- Statement nodes (global bodies included): sharing `sumTo` in the global context is smaller
--- than copying it at each call site.
-/-- info: [11, 19] -/
+-- Statement nodes (global bodies included): both programs share their recursive function in
+-- the global context; `useInlined` has one global function less (`tripleI` is inlined).
+/-- info: [11, 8] -/
 #guard_msgs in
 #eval [useGlobals_term.size, useInlined_term.size]
 

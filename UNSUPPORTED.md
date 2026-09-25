@@ -139,15 +139,20 @@ Details:
   so a value used twice is computed twice. For example, `let x := n * n; x + x` is accepted and
   evaluates `n * n` twice. A pure `let` statement would fix this; it is listed as a possible next
   step, not implemented.
-* **Duplicated local functions** ([documented], `Tests/Globals.lean`, `CONTEXTS_ASSESSMENT.md`).
-  Each call of an `@[inlinable]` recursive helper produces its own `fix` copy: 3 calls give 3
-  copies. Non-inlinable helpers are shared as global functions.
+* **Loops use stack too** ([documented], `STACK_OVERFLOW.md`). A loop (recursive join point,
+  including a `wf_while` loop) runs each iteration as a jump through `WellFounded.fix`, which
+  uses a few stack frames per iteration in the interpreter; the runtime check of
+  `diagonalWhile` in `Tests/While.lean` is limited to about 1 000 iterations for this reason.
+* **Inlined loops are per call site** ([documented], `Tests/Loops.lean`). A tail-recursive
+  `@[inlinable]` helper called twice gives two loops, as inlining does. Recursive helpers with
+  non-tail self calls are shared as global functions (the local-function context was removed,
+  see `CONTEXTS_ASSESSMENT.md`).
 
 ## 6. Capture and tooling rough edges ([documented])
 
-* **Same-body clash:** if one program contains a global function and an `@[inlinable]` function
-  with the same body and signature (e.g. `sumTo a + sumToI a`), `wf_agree` can confuse them and
-  fail.
+* **Same-body clash:** if one program contains two global functions with the same body and
+  signature (e.g. `sumTo a + sumToI a`, where the non-tail-recursive `@[inlinable]` `sumToI` is a
+  global function too), `wf_agree` can confuse them and fail.
 * **Calls with all arguments known** are evaluated by the kernel at capture time, with no cost limit:
   a slow closed call (a large Ackermann value) makes the capture slow. Turn this off with
   `set_option wfLang.foldCalls false`.

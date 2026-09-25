@@ -12,7 +12,7 @@ theorems into `SourceProofs.lean`.  This file accounts for **each** of those fun
 
 | function (namespace `Tco`)   | file      | `#lean_wf_func_to_term`             | agreement            |
 |------------------------------|-----------|-------------------------------------|----------------------|
-| `ack`                        | Ack       | captured (nested `fix`)             | `ExPCL.ack_agree`    |
+| `ack`                        | Ack       | captured (global function)          | `ExPCL.ack_agree`    |
 | `ack999`                     | Ack       | captured (0 arguments)              | `ack999_agree` below |
 | `ack2`                       | Ack       | captured (recursion through `ackInner`'s function argument) | `ack2_term_agree` below; also `ack2_agree` (via `ack`) |
 | `ackWhile`                   | Ack       | rejected: `while` loop              | runtime check below  |
@@ -23,7 +23,7 @@ theorems into `SourceProofs.lean`.  This file accounts for **each** of those fun
 | `diagonal`                   | Diagonal  | captured                            | `ExPCL.diagonal_agree` |
 | `diagonal_tr`                | Diagonal  | captured                            | `ExPCL.diagonal_tr_agree` |
 | `diagonalWhile`              | Diagonal  | rejected: `while` loop              | runtime check below  |
-| `hyper`                      | Hyper     | captured (nested `fix`)             | `ExPCL.hyper_agree`  |
+| `hyper`                      | Hyper     | captured (global function)          | `ExPCL.hyper_agree`  |
 | `hyperBase`                  | Hyper     | captured (no recursion)             | `ExNonRec.hyperBase_agree` |
 | `hyperLoop`                  | Hyper     | captured when specialised, e.g. `(hyperLoop (hyperBase 2))` | `hyperLoop_agree` below |
 | `hyperTCO`                   | Hyper     | captured (recursion through `hyperLoop`'s function argument) | `hyperTCO_term_agree` below; also `hyperTCO_agree` (via `hyper`) |
@@ -105,7 +105,7 @@ theorem hyperLoop_agree : ∀ b acc,
 `ack2 (m + 1) = ackInner (ack2 m)`, `hyperTCO (n + 1) a b = hyperLoop (hyperTCO n a) b …` and
 `hyperWhile`'s `for` loop (whose body calls `hyperWhile n a`) call themselves inside a function
 argument.  Each is captured together with the copy of `ackInner`, `hyperLoop` or the loop
-specialised to that argument, as one local recursive function with a tag parameter (relation
+specialised to that argument, as one global function with a tag parameter (relation
 `WFLang.hoRel`, see `Gaps.lean`).  (`ack2` returns a function; its program takes both
 arguments.) -/
 
@@ -188,7 +188,8 @@ first line of the error message. -/
 #expect_reject (#lean_wf_func_to_term Tco.AckWithoutStackButUsingCantorPairing.unpairRight :
   PCL.Term ⟨[.nat], .nat⟩)
 
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
+-- (the calls of `unpairLeft`/`unpairRight` are inside the body of Lean's `while` loop)
+/-- info: rejected: #lean_wf_func_to_term: call in an unsupported position -/
 #guard_msgs in
 #expect_reject
   (#lean_wf_func_to_term Tco.AckWithoutStackButUsingCantorPairing.ackNoDataStructure :

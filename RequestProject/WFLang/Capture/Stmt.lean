@@ -289,7 +289,7 @@ partial def lift (c : Ctx) (e : Lean.Expr) (k : Ctx → Lean.Expr → TermElabM 
   if let some s := e.find? hoistable then
     return ← lift c s fun c v =>
       lift c (e.replace fun x => if x == s then some v else none) k
-  throwError "#lean_wf_func_to_term: recursive call in an unsupported position{indentExpr e}"
+  throwError "#lean_wf_func_to_term: call in an unsupported position{indentExpr e}"
 
 /-- `let v := g args in k` for the global function `gi` (signature `sig`): the arguments `pre`
 (tag and object arguments) are evaluated first; the padding of a function captured together

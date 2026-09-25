@@ -101,7 +101,7 @@ theorem mixed_agree : ∀ n, Term.eval mixed_term n = JoinEx.mixed n := by wf_ag
 #guard_msgs in
 #eval [alt_term.joins, seq4_term.joins, nested_term.joins, viaMatch_term.joins, mixed_term.joins]
 
-/-- info: [12, 26, 17, 12, 17] -/
+/-- info: [11, 25, 16, 11, 16] -/
 #guard_msgs in
 #eval [alt_term.size, seq4_term.size, nested_term.size, viaMatch_term.size, mixed_term.size]
 
@@ -109,11 +109,11 @@ theorem mixed_agree : ∀ n, Term.eval mixed_term n = JoinEx.mixed n := by wf_ag
 
 `set_option wfLang.joinPoints false` restores the previous behaviour: the rest of the
 computation is copied into both branches.  With `k` non-tail `if`s in sequence
-(`seq2`, `seq3`, `seq4`), the programs with join points have 16, 21, 26 nodes (5 more per `if`),
-the programs with copies 15, 27, … nodes (the copies double with each `if`; the capture of
+(`seq2`, `seq3`, `seq4`), the programs with join points have 15, 20, 25 nodes (5 more per `if`),
+the programs with copies 14, 26, … nodes (the copies double with each `if`; the capture of
 `seq4` with copies did not finish elaborating within 4 000 000 heartbeats when tried, so it is
-not in this file).  When the continuation is tiny, copying is smaller: `nested` has 17 nodes
-with join points and 13 with copies. -/
+not in this file).  When the continuation is tiny, copying is smaller: `nested` has 16 nodes
+with join points and 12 with copies. -/
 
 def seq2_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term JoinEx.seq2
 def seq3_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term JoinEx.seq3
@@ -127,11 +127,11 @@ def nested_dup_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term JoinEx.ne
 theorem seq3_agree : ∀ n, Term.eval seq3_term n = JoinEx.seq3 n := by wf_agree
 theorem seq3_dup_agree : ∀ n, Term.eval seq3_dup_term n = JoinEx.seq3 n := by wf_agree
 
-/-- info: [16, 21, 26] -/
+/-- info: [15, 20, 25] -/
 #guard_msgs in
 #eval [seq2_term.size, seq3_term.size, seq4_term.size]
 
-/-- info: [15, 27, 13] -/
+/-- info: [14, 26, 12] -/
 #guard_msgs in
 #eval [seq2_dup_term.size, seq3_dup_term.size, nested_dup_term.size]
 
