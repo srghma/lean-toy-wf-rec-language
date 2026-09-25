@@ -15,6 +15,7 @@ import RequestProject.WFLang.Core.While
   functions are inlined (`inlineCalls`), recursive `@[inlinable]` ones are reported
   (`recCallees`) so that the capture turns them into nested `fix` nodes at the call site, and
   the other ones are collected as global functions of the program (`collectGlobals`);
+  calls whose arguments are all known are evaluated first (`foldCall?`, `wfFoldCalls`);
 * the skeleton of the agreement tactic (`agreeTarget`, `agreeRec`, `rewriteCalleesWith`) and the
   tactics `wf_dec` (one decrease obligation) and `wf_close` (the goals left after unfolding).
 -/
@@ -441,12 +442,123 @@ def isUserFn (fn c : Name) : MetaM Bool := do
 def userCallees (fn : Name) (e : Lean.Expr) : MetaM (Array Name) :=
   e.getUsedConstants.filterM (isUserFn fn)
 
+/-! ## Calls with known arguments -/
+
+/-- `set_option wfLang.foldCalls false` turns off the evaluation, at capture time, of the calls
+of user-defined functions whose arguments are all known (see `foldCall?`). -/
+register_option wfLang.foldCalls : Bool := {
+  defValue := true
+  descr := "#lean_wf_func_to_term evaluates the calls of user functions whose arguments are all known (closed terms)"
+}
+
+/-- The value of the closed term `e` of an object type (`Nat`, `Bool`, `Int`, pairs, lists), as a
+literal, computed by the kernel (the same evaluation that checks `decide +kernel`), if the
+kernel reduces it to constructors. -/
+partial def kernelValue? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
+  let ty ← whnfR (← inferType e)
+  let env ← getEnv
+  let whnfK (x : Lean.Expr) : Option Lean.Expr :=
+    match Kernel.whnf env {} x with
+    | .ok v => some v
+    | .error _ => none
+  let rec natVal? (x : Lean.Expr) (fuel : Nat) : Option Nat :=
+    match fuel with
+    | 0 => none
+    | fuel + 1 =>
+      match whnfK x with
+      | some (.lit (.natVal n)) => some n
+      | some v =>
+        if v.isConstOf ``Nat.zero then some 0
+        else if v.isAppOfArity ``Nat.succ 1 then (natVal? (v.getArg! 0) fuel).map (· + 1)
+        else none
+      | none => none
+  if ty.isConstOf ``Nat then
+    return (natVal? e 64).map mkNatLit
+  if ty.isConstOf ``Bool then
+    let some v := whnfK e | return none
+    return if v.isConstOf ``Bool.true || v.isConstOf ``Bool.false then some v else none
+  if ty.isConstOf ``Int then
+    let some v := whnfK e | return none
+    if v.isAppOfArity ``Int.ofNat 1 then
+      return (natVal? (v.getArg! 0) 64).map fun n => toExpr (n : Int)
+    if v.isAppOfArity ``Int.negSucc 1 then
+      return (natVal? (v.getArg! 0) 64).map fun n => toExpr (-((n : Int) + 1))
+    return none
+  if ty.isAppOfArity ``Prod 2 then
+    let some v := whnfK e | return none
+    unless v.isAppOfArity ``Prod.mk 4 do return none
+    let some a ← kernelValue? (v.getArg! 2) | return none
+    let some b ← kernelValue? (v.getArg! 3) | return none
+    return some (mkApp4 v.getAppFn (ty.getArg! 0) (ty.getArg! 1) a b)
+  if ty.isAppOfArity ``List 1 then
+    let some v := whnfK e | return none
+    if v.isAppOfArity ``List.nil 1 then return some (mkApp v.getAppFn (ty.getArg! 0))
+    unless v.isAppOfArity ``List.cons 3 do return none
+    let some h ← kernelValue? (v.getArg! 1) | return none
+    let some t ← kernelValue? (v.getArg! 2) | return none
+    return some (mkApp3 v.getAppFn (ty.getArg! 0) h t)
+  return none
+
+/-- Is `c` a user-defined first-order function whose calls with known arguments can be
+evaluated: a function of the user (not of a library, nor of this project's own definitions),
+not a matcher, with object parameters and an object result that is not a subtype. -/
+def isFoldableFn (c : Name) : MetaM Bool := do
+  if isInternalName c || (← isLibraryConst c) || (← isMatcher c) then return false
+  if (`WFLang).isPrefixOf c then return false
+  unless (← getConstInfo c).isDefinition do return false
+  try
+    let sig ← fnSig c
+    return !sig.subtypeRet && sig.specPos.isEmpty && sig.prfPos.isEmpty
+  catch _ => return false
+
+/-- **Evaluation of calls with known arguments.**  If `e` is a fully applied call `g a₁ … aₙ` of
+a user-defined function `g` (other than `fn`, whether `g` is `@[inlinable]`, a global function
+or a local recursive function) whose arguments are all known (`e` is a closed term), the value
+of `e` as a literal.  The capture replaces such a call by its value (so `g` is neither inlined
+nor put in the global context for that call), and the agreement tactic proves the equation
+`g a₁ … aₙ = v` by kernel evaluation (`wfFoldCalls`).  Turned off by
+`set_option wfLang.foldCalls false`. -/
+def foldCall? (fn : Name) (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
+  unless wfLang.foldCalls.get (← getOptions) do return none
+  let .const c _ := e.getAppFn | return none
+  if c == fn then return none
+  if e.hasFVar || e.hasMVar || e.hasLooseBVars then return none
+  unless ← isFoldableFn c do return none
+  unless e.getAppNumArgs == (← fnSig c).arity do return none
+  kernelValue? e
+
+/-- The simplification procedure of the agreement proofs matching the evaluation of calls with
+known arguments by the capture (`foldCall?`): it rewrites `g a₁ … aₙ` (closed) to its value
+`v`, with the proof `of_decide_eq_true rfl`, checked by the kernel. -/
+simproc_decl wfFoldCalls (_) := fun e => do
+  let some v ← foldCall? .anonymous e | return .continue
+  let p ← mkEq e v
+  let inst ← synthInstance (mkApp (mkConst ``Decidable) p)
+  let pf := mkApp3 (mkConst ``of_decide_eq_true) p inst
+    (mkApp2 (mkConst ``Eq.refl [1]) (mkConst ``Bool) (mkConst ``Bool.true))
+  return .done { expr := v, proof? := some pf }
+
+/-- Replace the calls with known arguments in `e` by their values (`foldCall?`), outside
+proofs. -/
+def foldCalls (fn : Name) (e : Lean.Expr) : MetaM Lean.Expr := do
+  unless wfLang.foldCalls.get (← getOptions) do return e
+  Meta.transform e
+    (pre := fun e => do
+      if e.isApp && !e.hasLooseBVars then
+        if (← try isProof e catch _ => pure false) then return .done e
+      return .continue)
+    (post := fun e => do
+      if let some v ← foldCall? fn e then return .done v
+      return .continue)
+
 /-- Inline the fully applied calls of the *non-recursive* user-defined functions marked
-`@[inlinable]` in `e` (using their unfolding equations `g.eq_def`, transitively).  Returns the
-new term and the unfolding equations used.  The calls of the other non-recursive functions
-stay: they become calls of global functions. -/
+`@[inlinable]` in `e` (using their unfolding equations `g.eq_def`, transitively), and replace
+the calls with known arguments by their values (`foldCall?`, outside proofs).  Returns the new
+term and the unfolding equations used.  The calls of the other non-recursive functions stay:
+they become calls of global functions. -/
 def inlineCalls (fn : Name) (e : Lean.Expr) : MetaM (Lean.Expr × Array Name) := do
   let used ← IO.mkRef (#[] : Array Name)
+  let e ← foldCalls fn e
   let e ← Meta.transform e (post := fun e => do
     let .const c _ := e.getAppFn | return .continue
     unless ← isUserFn fn c do return .continue
@@ -460,7 +572,7 @@ def inlineCalls (fn : Name) (e : Lean.Expr) : MetaM (Lean.Expr × Array Name) :=
     if (rhs.find? (·.isConstOf c)).isSome then return .continue
     used.modify fun u => if u.contains eqn then u else u.push eqn
     return .visit rhs)
-  return (e, ← used.get)
+  return (← foldCalls fn e, ← used.get)
 
 /-! ## Bounded loops -/
 
@@ -1390,11 +1502,13 @@ In the main goal, find a value `(fixFn wf body x hx).1` of a nested recursive no
 it by `(F x hx).1`, where `F = fnSolution g` for one of the `callees` `g` with that signature.
 This is justified by the uniqueness lemma `fixFn_unique`, and the equation is proved by
 unfolding `g` once and running `step g`.  Repeats until no such value is left. -/
-partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees : Array Name) :
-    Tactic.TacticM Unit := do
+partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees : Array Name)
+    (afterLoop : Tactic.TacticM Unit := pure ()) : Tactic.TacticM Unit := do
   if (← Tactic.getGoals).isEmpty then return
   let tgt ← Tactic.withMainContext do instantiateMVars (← Tactic.getMainTarget)
-  let some fx := tgt.find? (·.isAppOfArity `WFLang.PCL.fixFn 13) | return
+  let some fx := tgt.find? (fun x => x.isAppOfArity `WFLang.PCL.fixFn 11 ||
+      (x.isAppOfArity `WFLang.PCL.joinFn 19 && !x.appFn!.appFn!.hasLooseBVars)) | return
+  let isLoop := fx.isAppOf `WFLang.PCL.joinFn
   let fnStx ← Tactic.withMainContext do exprToSyntax fx.appFn!.appFn!
   -- the candidates: the recursive callees, and the specialised copies called in the goal
   let specs ← Tactic.withMainContext do specRefsIn .anonymous tgt
@@ -1409,6 +1523,9 @@ partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees :
       | continue
     -- only callees with the signature of the node are candidates
     let fits ← Tactic.withMainContext do
+      if isLoop then
+        -- a loop: its parameter is the tuple of the parameters of the callee
+        return (← isDefEq (fx.getArg! 8) (mkApp (mkConst `WFLang.PCL.tupleTy) (mkTyList argTys)))
       return (← isDefEq (fx.getArg! 2) (mkTyList argTys)) && (← isDefEq (fx.getArg! 3) retTy)
     unless fits do continue
     let saved ← saveState
@@ -1417,7 +1534,15 @@ partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees :
       let eqns ← members.mapM fun m => do
         let some eqn ← getUnfoldEqnFor? m (nonRec := true) | throwError "no equation"
         pure (mkIdent eqn)
-      let F ← Tactic.withMainContext do exprToSyntax (← fnSolution g)
+      let sol ← Tactic.withMainContext do exprToSyntax (← fnSolution g)
+      -- for a loop: the value of the join point on `x` is the rest of the computation (the join
+      -- point `K`, the first value of the join points in scope at the loop) on the callee's
+      -- value
+      let F ← if isLoop then do
+          let je ← Tactic.withMainContext do exprToSyntax (fx.getArg! 16)
+          let ps ← Tactic.withMainContext do exprToSyntax (mkTyList argTys)
+          `(fun x _ => ($je).1 (($sol) ($(mkIdent `WFLang.PCL.toEnv) $ps x) trivial).1 trivial)
+        else pure sol
       Tactic.withMainContext do
         let hTy ← Term.withoutErrToSorry do
           let t ← Term.elabTerm (← `(∀ x hx, ($fnStx x hx).1 = ($F x hx).1))
@@ -1426,11 +1551,40 @@ partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees :
           instantiateMVars t
         let pf ← mkFreshExprSyntheticOpaqueMVar hTy
         let rest ← Term.withoutErrToSorry <| Tactic.run pf.mvarId! <| Tactic.withoutRecover do
-          Tactic.evalTactic (← `(tactic| (
-            refine $(mkIdent `WFLang.PCL.fixFn_unique) _ _ _ _ $F ?_
-            intro x hx
-            dsimp only)))
-          if g.group.isEmpty then
+          if isLoop then
+            -- (all the arguments of `joinFn` explicitly: the postcondition of the loop cannot
+            -- be inferred from `F`)
+            let fargs ← Tactic.withMainContext do
+              (fx.getAppArgs.extract 0 17).mapM fun a => exprToSyntax a
+            let lem := Syntax.mkApp (mkIdent `WFLang.PCL.joinFn_unique) #[]
+            let lemAt ← `(@$(⟨lem.raw⟩) $fargs* $F)
+            -- the join points in scope (the rest of the computation) are arbitrary: generalize
+            -- them, so that loops in the rest of the computation are not unfolded here
+            let je ← Tactic.withMainContext do exprToSyntax (fx.getArg! 16)
+            Tactic.evalTactic (← `(tactic| (
+              refine $lemAt ?_
+              try generalize $je:term = J
+              intro $(mkIdent `wfLpx):ident hx
+              dsimp only)))
+            -- the components of the tuple become variables
+            for i in [0:argTys.length - 1] do
+              let c := mkIdent (Name.mkSimple s!"wfLp{i}")
+              let xl := mkIdent `wfLpx
+              Tactic.evalTactic (← `(tactic| obtain ⟨$c:ident, $xl:ident⟩ := $xl:ident))
+            Tactic.evalTactic (← `(tactic| try simp only [$(mkIdent `WFLang.PCL.toEnv_cons):ident, $(mkIdent `WFLang.PCL.toEnv_one):ident]))
+          else
+            Tactic.evalTactic (← `(tactic| (
+              refine $(mkIdent `WFLang.PCL.fixFn_unique) _ _ _ $F ?_
+              intro x hx
+              dsimp only)))
+          if g.group.isEmpty && isLoop then
+            -- unfold the callee at the loop variables (the rest of the computation may contain
+            -- other calls of the callee)
+            let vs := ((List.range (argTys.length - 1)).map
+              (fun i => mkIdent (Name.mkSimple s!"wfLp{i}"))).toArray.push (mkIdent `wfLpx)
+            let e := eqns[0]!
+            Tactic.evalTactic (← `(tactic| first | rw [$e:ident $vs*] | rw [$e:ident]))
+          else if g.group.isEmpty then
             Tactic.evalTactic (← `(tactic| rw [$(eqns[0]!):ident]))
           else
             -- rewrite each member at the arguments `x.2` of the solution (the unfolded
@@ -1453,8 +1607,11 @@ partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees :
         Tactic.replaceMainGoal [mvarId]
       let h := mkIdent `hcallee
       Tactic.evalTactic (← `(tactic| (simp only [$h:ident] at *); try clear $h))
-      return ← rewriteCalleesWith step callees
-    catch _ => restoreState saved
+      -- after a loop: evaluate the rest of the computation (which may contain further nodes)
+      if isLoop then afterLoop
+      return ← rewriteCalleesWith step callees afterLoop
+    catch _ =>
+      restoreState saved
   throwError "wf_agree: could not identify the function computed by{indentExpr fx.appFn!}"
 
 /-- The common skeleton of the agreement proofs for recursive functions.  The goal is first

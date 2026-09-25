@@ -1,3 +1,73 @@
+# Summary of changes for run f70d706a-08ba-4ca8-9107-758881c43445
+I wrote `UNSUPPORTED.md`, an assessment of what the language and `#lean_wf_func_to_term` still can't do. I also added a test file, `RequestProject/WFLang/Tests/Unsupported.lean`, that pins each new rejection with `#guard_msgs`: if the capture starts accepting one of those functions, `lake build` fails. The full `lake build` passes and the new test file has no `sorry`. Entries I didn't re-test are marked "[documented]" in the file, meaning they are taken from the earlier notes.
+
+**Unsupported, with tests pinning the rejection:**
+- **Types:** only `Nat`, `Bool`, `Int`, pairs, lists and subtypes of them are allowed. `Option`, `String`, user structures and `Array` are rejected, even when they only appear as intermediate values. A `match` on the constructors of `Int` is also rejected.
+- **Library code:** `List.map`, `foldl`, `contains`, `getD`, `l[i]!` and `decide` on a bounded `∀` are rejected, as is a recursive call under a `fun` passed to a library function (`underLambda`).
+- **`do` notation:** rejected are `for x in l` over a list, `break`, early `return`, and ranges with a step. By contrast, `for` over a plain range, `let mut` with `if`, and `let rec` are accepted.
+- **Recursion:**
+  - Lean's own `while`, `partial` and `partial_fixpoint` are rejected.
+  - Mutually recursive functions must share the same signature.
+  - Calls inside a `wf_while` loop body are rejected.
+- **A termination proof the capture can't redo:** `nestMin (n+1) = nestMin (min n (nestMin n)) + 1`. Lean proves it terminates, but the capture fails on a goal that is true, because it turns `min` into an `if` and Lean's proof no longer fits. This is a new finding and a gap in the capture's automation, not in the language.
+
+**Other limits, taken from the earlier notes:**
+- The capture itself has no correctness theorem; each captured function is only trusted once its own agreement theorem is proved.
+- The evaluator uses one stack frame per recursive call, tail calls included. Under `#eval` it aborts at around 2–3k nested calls.
+- A value bound by `let` and used twice is computed twice.
+- Each call of an `@[inlinable]` recursive helper makes a separate copy of it.
+- Some tooling rough edges, e.g. `wf_agree` can mix up two functions with the same body, and error messages are vague.
+
+The file ends with a suggested order for further work, starting with `Option`/sum types and list loops. `README.md` now links to it.
+
+# Summary of changes for run 447b61cb-6dda-4e6d-b775-1eef326acb48
+I wrote the assessment in `CONTEXTS_ASSESSMENT.md`. It is based on reading the code only: I didn't change the language or the capture, and none of the claims has a new Lean proof behind it. In the code, "fnCtx" is the `fns` index of `Expr`, "jpCtx" is `js : JScope`, and "globalCtx" is the `GL` parameter.
+
+**1. Removing fnCtx: there is no semantic or soundness reason to keep it.**
+- **Local functions are already closed.** A `fix` body sees only its own parameters and an empty join-point scope, and its `R`/`pre`/`post` mention only those parameters. Its value depends only on the globals and on earlier local functions, so each one is a global in disguise.
+- **Callers learn the same thing either way.** `fnCall` and `gCall` have identical premises (precondition in, postcondition out), so moving a function to the globals loses no decrease-proof information.
+- **The ordering rules match.** Both contexts only allow calls to functions defined earlier, so lifting a `fix` into the global list is always possible.
+- **The capture never really uses the context.** Every local call it emits is a fresh `fix` followed by `fnCall FnVar.here`, so a callee called k times is copied k times. `Tests/Globals.lean` pins this: 3 `fix` copies for 3 calls, and program size 19 versus 11 with globals.
+- **`wf_agree` already treats local and global callees the same way.**
+
+The reasons to keep it are all costs, not limitations of the language:
+- The capture would need an up-front pass to collect and deduplicate `@[inlinable]` recursive callees, mutual groups, self-calling higher-order functions and specialised copies.
+- A recursive `@[inlinable]` function would become global unless recursive join points exist, so the attribute would do nothing for it.
+- Many pinned test counts (`fixes`, `nglobals`, `size`) would change.
+- Programs would be slightly less self-contained to read.
+
+**2. Should jpCtx take `R`? Yes, if it is done together with removing fnCtx.**
+- **Shape of `R`:** it should depend on the environment where the join point is defined, like `whileLoop`'s relation, with `wf : ∀ e, WellFounded (R e)`. Only jumps from inside the join point's own body (back edges) need a decrease proof; the entry jump does not.
+- **What it buys:**
+  - It subsumes `whileLoop`.
+  - Loops could exit early and call the enclosing recursive function, which neither `whileLoop` nor `fix` allows today.
+  - Loops keep their captured variables instead of taking them as extra parameters, and decrease proofs get the full path condition.
+  - Every tail-recursive helper, called anywhere, can become a join point; only functions with non-tail recursion need to be globals.
+  - It is a step towards evaluating tail calls without growing the stack (see `STACK_OVERFLOW.md`), though it does not fix that in the current evaluator.
+- **What it costs:** the join-point context must track the current argument to check decreases, `jump` needs a decrease field, and new equation and uniqueness lemmas are needed. The largest change is in `PCL/Termination.lean`, where finding the first recursive call must now iterate through recursive join points. The capture also needs a tail-recursion check, rewriting of the helper's returns, and an agreement proof per join point.
+
+The file recommends doing both changes: local functions split into recursive join points (tail recursion) and globals (everything else). If only one is done, removing fnCtx in favour of globals is the cheaper change. Adding `R` alone would leave three overlapping loop mechanisms: `fix`, `whileLoop` and recursive join points.
+
+The file is committed; no Lean files changed.
+
+# Summary of changes for run 54ed47dd-645a-4154-af63-da1724d3dabb
+**1. `where` helpers: yes, the capture already matched Lean, and I didn't need to change anything.** Lean turns `def foo … where go …` into two top-level constants, `foo` and `foo.go`, and `#lean_wf_func_to_term` treats `foo.go` like any other user function. Capturing your `foo` gives 1 global function (`foo.go`) and 1 global call. If you write `where @[inlinable] go …`, `go` is inlined as a local recursive function (`fix`) instead, and an `@[inlinable]` function never ends up in the global context. `foo.go` can also be captured on its own, and a function outside `foo` can call it (`useGo`). The new file `Tests/WhereFold.lean` fixes these counts in place and proves each case agrees with its Lean definition.
+
+**2. Calls where all arguments are known: they weren't evaluated before; now they are.** Before this change, `a + triple 3 + sumTo 4` kept both calls and put both functions in the global context.
+- **What changed:** when every argument of a call is known (the call contains no variables), the capture computes its value and uses that instead. This applies whether or not the callee is `@[inlinable]`, recursive or not, including `where` helpers. A function that is only called this way doesn't appear in the program at all.
+- **Example:** `allKnown a = a + triple 3 + sumTo 4 + foo.go 2 3 + fact 5 + gcd 12 18 + sumDigits 1234` becomes a single `ret (a + 9 + 10 + 5 + 120 + 6 + 10)`, with no global functions and no local `fix`.
+- **Turning it off:** `set_option wfLang.foldCalls false` restores the old behaviour; the same function then has 6 global functions.
+- **Proofs:** the value is computed by Lean's kernel, and `wf_agree` proves each `g args = value` step with the same kernel computation, so the agreement proofs stay automatic. `#print axioms allKnown_agree` shows only `propext` and `Quot.sound`.
+- **Not evaluated:** recursive calls of the function being captured, callees with a subtype result, preconditions or function parameters, and calls inside proofs.
+- **Where:** the code is in `Capture/Meta.lean` (`foldCall?`, `foldCalls`, `wfFoldCalls`), and `Capture/Elab.lean` adds it to the proof steps.
+
+**Status:** the full `lake build` passes, including all existing tests (none of their pinned counts changed) and the new file; `lake build wfbench` also passes, and there is no `sorry`. The new tests cover mixed known and unknown calls, nested calls, a known call in an `if` test, known calls inside a recursive function and inside a global function's body, `Bool`/`Int`/pair/list results, and runtime comparisons. I updated `README.md`, `GRAMMAR.md` and the header comments, and added two entries to the Properties table. All work is committed.
+
+**Limitations:**
+- **Same-body clash (existed before this change):** if one program contains both a global function and an `@[inlinable]` function with the same body and signature (e.g. `sumTo a + sumToI a`), `wf_agree` can mix the two up and fail. I worked around it in the tests by using a different inlinable function (`fact`); the tactic itself is unchanged.
+- **Constant grouping:** known values are not regrouped across `+`, so `a + 9 + 10` is not simplified to `a + 19`.
+- **Kernel speed:** evaluation happens at capture time with no cost limit, so a known call that is very slow to compute (e.g. a large Ackermann value) will make the capture slow.
+
 # Summary of changes for run 69845e56-0d4c-4643-8303-6b7b9aa8907d
 `PCL` now has a well-founded `while` loop, and `#lean_wf_func_to_term` captures Lean functions that use one. Lean's own `while` in `do` notation still can't be captured, so loops have to be written with the new `wf_while` notation (or `WFLang.whileWF`). The full `lake build` passes, including all the existing tests and `wfbench`, and there is no `sorry`. `#print axioms` on the new theorems I sampled shows only `propext`, `Classical.choice` and `Quot.sound`.
 

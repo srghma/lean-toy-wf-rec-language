@@ -132,6 +132,23 @@ needs the value computed by a helper (`logHalf n` calls itself on `half n`), the
 the global context gives a smaller program than inlining it at each call site
 (11 vs 19 nodes).
 
+`where` helpers: Lean compiles `def foo … where go …` into two top-level constants, `foo` and
+`foo.go`, and `foo.go` can be called from anywhere. The capture follows Lean: `foo.go` is a
+user function like any other, so it is an entry of the global context unless it is marked
+`@[inlinable]` (`where @[inlinable] go …`). An `@[inlinable]` function never appears in the
+global context.
+
+Calls with known arguments: a call `g a₁ … aₙ` of a user function whose arguments are all known
+(the call is a closed term) is evaluated when the function is captured and replaced by its
+value (`foldCall?` in `Capture/Meta.lean`; the kernel computes the value). This holds for
+global functions and `@[inlinable]` ones alike, recursive or not. The function is then not
+needed for that call, so a function only called with known arguments is neither in the global
+context nor a local `fix`. `wf_agree` proves each equation `g a₁ … aₙ = v` with the same kernel
+evaluation (the simplification procedure `wfFoldCalls`). Not evaluated: calls of the function
+being captured itself, of functions with a subtype result, proof parameters or function
+parameters, and calls inside proofs. `set_option wfLang.foldCalls false` turns it off.
+See `Tests/WhereFold.lean`.
+
 ## Join points (`PCL/Lang.lean`)
 
 **The problem.** A non-tail `if` containing a call, such as `(if c then f a else f b) + rest`, had

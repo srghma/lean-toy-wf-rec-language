@@ -50,6 +50,42 @@ structure HOInfo where
   gRef : FnRef
   gSig : FnSig
 
+/-- How a call of another recursive user function (not a global function by its attribute) is
+captured. -/
+inductive CalleeKind where
+  /-- as a call of a global function (`gCall`): the function is added to the global context of
+  the program the first time it is called (`@[inlinable]` functions that are not
+  tail-recursive, groups of mutually recursive functions, functions calling themselves inside a
+  function argument) -/
+  | global
+  /-- inlined as a **recursive join point** at the call site (a tail-recursive `@[inlinable]`
+  function): a loop inside the caller -/
+  | loop
+  deriving Inhabited, BEq
+
+/-- What the translation needs to know about a global function it calls: its position in the
+global context (see `gvarStx`), whether its first parameter is the tag `0` (a function captured
+together with a specialised function, see `HOInfo`) and the number of padded parameters after
+its own. -/
+structure GInfo where
+  pos : Nat
+  tag0 : Bool := false
+  pad : Nat := 0
+  deriving Inhabited
+
+/-- Inside the body of a recursive join point `L` capturing a tail-recursive function `ref`
+(signature `sig`): a tail call of `ref` is a back edge `jump L`.  `dL` is the number of join
+points in scope outside `L` and `vL` the number of variables in scope at the definition of
+`L` (its parameter included). -/
+structure LoopInfo where
+  ref : FnRef
+  sig : FnSig
+  dL : Nat
+  vL : Nat
+  /-- the lifted variables of a specialised `ref` (projections of the parameter of `L`), passed
+  again at each back edge -/
+  extra : List Lean.Expr := []
+
 structure Ctx where
   fn : Name
   /-- The local variables, innermost first (the de Bruijn order of the object context). -/
@@ -58,12 +94,10 @@ structure Ctx where
   lemmas : Array Stx := #[]
   /-- The tactic proving one decrease obligation (default `wf_dec`). -/
   decTac : Option (TSyntax `tactic) := none
-  /-- Other recursive functions that may be called, each with its signature and the head of
-  its local recursive function node (`PCL.Expr.fix ps r R wf pre post body`, still to be
-  applied to its scope `fnCall FnVar.here args hpre k`): each call becomes such a node, in tail
-  position, followed by the call. -/
-  callees : Array (Name × FnSig × Stx) := #[]
-  /-- The signature of `fn`, when its recursive calls are captured (inside its `fix` body). -/
+  /-- Other recursive functions that may be called, each with its signature (at the call site:
+  tag, padding) and how its calls are captured. -/
+  callees : Array (Name × FnSig × CalleeKind) := #[]
+  /-- The signature of `fn`, when its recursive calls are captured (inside its body). -/
   fnSig? : Option FnSig := none
   /-- Must each `ret` prove a postcondition (inside the body of a function with a subtype
   result)? -/
@@ -72,29 +106,41 @@ structure Ctx where
   the group (a call of `group[i]` is a recursive call with the tag `i` as first argument). -/
   group : Array Name := #[]
   /-- Recursive functions with function (or type) parameters that may be called: each call
-  becomes a nested node capturing the copy specialised to its function arguments. -/
+  is a call of the copy specialised to its function arguments (a recursive join point if it is
+  tail-recursive, a global function otherwise). -/
   specFns : Array Name := #[]
-  /-- The head of the local recursive function capturing a specialised copy. -/
-  specHead : FnRef → TermElabM Stx := fun f =>
+  /-- The global context under construction: the position of the global function capturing a
+  function (registered on first use). -/
+  gref : FnRef → TermElabM GInfo := fun f =>
     throwError "#lean_wf_func_to_term: unexpected call of {f.name}"
+  /-- Save the state of the global context under construction; the action returned restores
+  it (after a failed attempt, e.g. a function that turns out not to be a loop). -/
+  gcheckpoint : TermElabM (TermElabM Unit) := pure (pure ())
   /-- The lifted variables of `fn`, if it is a specialised copy: its first (fixed) parameters,
   passed again at each recursive call. -/
   selfExtra : List Lean.Expr := []
   /-- The specialised values of `fn` (at its specialised positions), if it is a specialised
   copy: its recursive calls must pass the same ones. -/
   selfSpec : List Lean.Expr := []
-  /-- Inside the local recursive function capturing `f` together with a specialised `g` whose
+  /-- Inside the global function capturing `f` together with a specialised `g` whose
   function argument calls `f` (see `HOInfo`). -/
   ho : Option HOInfo := none
   /-- Discovery mode: a call of a function with a function argument that calls `fn` is recorded
   here (and aborts the translation), instead of being rejected. -/
   hoFound : Option (IO.Ref (Option FnRef)) := none
   /-- The join points in scope, innermost first: for each, the number of variables in scope at
-  its definition.  Empty in the body of each local recursive function. -/
+  its definition.  Empty in the body of each global function. -/
   joins : List Nat := []
-  /-- The global functions visible here, in the order of the global context (each with its
-  signature): a call of `globals[j]` is `Expr.gCall` with the index of `globals[j]`. -/
+  /-- The global functions (by attribute) visible here, each with its signature: a call of one
+  of them is `Expr.gCall`. -/
   globals : Array (Name × FnSig) := #[]
+  /-- Inside the body of a recursive join point capturing a tail-recursive function. -/
+  loop? : Option LoopInfo := none
+  /-- Inside the body of a recursive join point: the join point `K` (the rest of the
+  computation after the loop) that each tail position jumps to, instead of returning: the
+  number of join points in scope outside `K` and the number of variables in scope at its
+  definition. -/
+  exitK : Option (Nat × Nat) := none
 
 /-- A `Ctx` over the parameters `xs` of the captured function (its object parameters: the
 proof parameters are not variables of the object language). -/
@@ -142,29 +188,39 @@ def specCall? (c : Ctx) (e : Lean.Expr) : MetaM (Option (FnRef × Array Lean.Exp
       throwError "#lean_wf_func_to_term: the function argument of {g} uses {y}, which is not a variable of the program"
   return some (ref, ys)
 
-/-- If `e` is a (full) call of one of the recursive callees: its signature and the head of its
-local recursive function node. -/
-def calleeCall? (c : Ctx) (e : Lean.Expr) : Option (FnSig × Stx) :=
+/-- If `e` is a (full) call of one of the recursive callees: its signature and how it is
+captured. -/
+def calleeCall? (c : Ctx) (e : Lean.Expr) : Option (FnSig × CalleeKind) :=
   match e.getAppFn with
   | .const g _ => (c.callees.find? fun (g', sig, _) => g' == g && e.getAppNumArgs == sig.arity).map
       (·.2)
   | _ => none
 
-/-- If `e` is a (full) call of one of the global functions visible here: its position in the
-global context and its signature. -/
-def globalCall? (c : Ctx) (e : Lean.Expr) : Option (Nat × FnSig) :=
+/-- If `e` is a (full) call of one of the global functions (by attribute) visible here: its
+name and signature. -/
+def globalCall? (c : Ctx) (e : Lean.Expr) : Option (Name × FnSig) :=
   match e.getAppFn with
-  | .const g _ => (c.globals.findIdx? fun (g', sig) => g' == g && e.getAppNumArgs == sig.arity).map
-      fun j => (j, c.globals[j]!.2)
+  | .const g _ => c.globals.find? fun (g', sig) => g' == g && e.getAppNumArgs == sig.arity
   | _ => none
 
-/-- The index (`PCL.FnVar` in the global context) of the global function at position `j`: the
-global context lists the functions innermost (last defined) first. -/
-def gvarStx (c : Ctx) (j : Nat) : MetaM Stx := do
-  let mut v : Stx := mkIdent `WFLang.PCL.FnVar.here
-  for _ in [0:c.globals.size - 1 - j] do
-    v ← `($(mkIdent `WFLang.PCL.FnVar.there) $v)
-  return v
+/-- The placeholder for the index (`PCL.FnVar`) of the global function at position `j` of the
+global context under construction.  The index itself depends on the number of global functions
+before the one whose body contains the call (or on their total number, in the main statement),
+which is only known when that body is complete: `resolveGRefs` replaces the placeholders then. -/
+def gvarStx (j : Nat) : Stx := mkIdent (Name.mkNum `_wfLangGRef j)
+
+/-- Replace the placeholders `gvarStx j` in `stx` by the indices of the global functions `j`, in
+a global context of `n` functions (the function at position `j` is `there^(n-1-j) here`: the
+context lists the functions innermost, i.e. last defined, first). -/
+partial def resolveGRefs (n : Nat) (stx : Syntax) : TermElabM Syntax :=
+  stx.replaceM fun s => do
+    let .ident _ _ (.num p j) _ := s | return none
+    unless p == `_wfLangGRef do return none
+    unless j < n do throwError "#lean_wf_func_to_term: internal error: global function {j} is not visible here"
+    let mut v : Stx := mkIdent `WFLang.PCL.FnVar.here
+    for _ in [0:n - 1 - j] do
+      v ← `($(mkIdent `WFLang.PCL.FnVar.there) $v)
+    return some v.raw
 
 /-- A placeholder for an erased proof of `p`.  It only occurs in proof positions, which the
 translation ignores (the capture writes its own proofs); if it ever reached a translated

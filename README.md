@@ -101,6 +101,13 @@ The capture supports:
     helper whose value a termination proof needs must be `@[inlinable]`);
   * functions with function parameters, members of a mutual group and functions calling
     themselves in a function argument are always captured at the call site;
+  * helpers declared in a `where` clause are, as in Lean, ordinary top-level functions
+    (`foo.go`), treated like any other function: global unless marked `@[inlinable]`
+    (`where @[inlinable] go …`);
+  * a call whose arguments are all known (a closed term) is evaluated when the function is
+    captured and replaced by its value, whatever the callee's attribute, so a function only
+    called that way does not appear in the program; `wf_agree` proves the equation by kernel
+    evaluation (turn off with `set_option wfLang.foldCalls false`);
 * subtype results (postconditions) and proof parameters (preconditions);
 * mutual recursion (one `fix` with a tag parameter);
 * **well-founded `while` loops** written with `wf_while x := init while c do body termination_by μ`
@@ -124,6 +131,9 @@ The capture supports:
 `GAPS.md` lists what is still rejected (e.g. calls under a `fun` in library code such as
 `List.map`, Lean's own `while` loops in `do` notation, which Lean builds without a termination
 proof, and calls inside the body of a well-founded `while`).
+`UNSUPPORTED.md` is the current assessment of everything still unsupported (types, library
+combinators, `do` features, termination arguments, evaluator limits); its rejections are pinned in
+`Tests/Unsupported.lean`.
 
 ## Use of Mathlib
 
@@ -191,6 +201,8 @@ RequestProject/WFLang/
     ├── Normal.lean                 optimised normal form: captures of simplifiable functions,
     │                               the isNF checks, unsimplified programs rejected
     ├── Globals.lean                global functions vs @[inlinable]; shapes and sizes
+    ├── WhereFold.lean              `where` helpers as global functions; calls with known
+    │                               arguments evaluated at capture time
     ├── WhileFunctions.lean         Lean functions written with well-founded `while` loops
     └── While.lean                  a hand-written `while` program with its specification;
                                     captures of the loops + agreement theorems, shapes,

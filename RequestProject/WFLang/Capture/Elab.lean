@@ -1,5 +1,4 @@
-import RequestProject.WFLang.PCL.Size
-import RequestProject.WFLang.Capture.Translate
+import RequestProject.WFLang.Capture.Stmt
 
 /-!
 # `#lean_wf_func_to_term f` — capture a well-founded Lean function as a `PCL.Term`
@@ -13,38 +12,30 @@ For a function with a subtype result the agreement is `PCL.Term.eval f_term xs =
 and for a function with proof parameters (a precondition) it is
 `PCL.PTerm.run f_term (x₁, …, ()) h = f x₁ … h`.
 
-The elaborator reads `f.eq_def`, and writes the program (`PTerm.ofFix`)
+The elaborator reads `f.eq_def` and writes the program as *surface syntax* of `PCL`, which Lean
+then elaborates against the expected type (the translation of right-hand sides into statements
+is in `Capture/Stmt.lean`):
 
-```
-fix self xs. ⟦rhs⟧   applied to xs
-```
-
-as *surface syntax* of `PCL.Expr`, which Lean then elaborates against the expected type:
-
-* control flow (`if`, `match` on `Nat`/`Bool`/lists, `&&`/`||` with a call on the right)
-  becomes `Expr.ite`, so each branch records its test in the path condition;
-* every recursive call is lifted out (A-normal form) into
-  `Expr.fixSelfCall args (by wf_dec …) hpre k`, and a `let` whose value calls is evaluated
-  once, before its body;
-* an `if`/`match` containing a call in *non-tail* position is compiled with a join point:
-  `join j (v) := ⟦rest⟧ in if c then (…; jump j a) else (…; jump j b)`, so that `ite` stays in
-  tail position (strict ANF) and the rest of the computation is written once (it is copied into
-  both branches instead when a call in scope has a postcondition, or with
-  `set_option wfLang.joinPoints false`);
-* the relation and its well-foundedness proof are the ones Lean built for `f`
-  (from `WellFounded.fix`), pulled back along the packing of the arguments;
-* each `by wf_dec …` proves that one call goes down, from the path condition, using the
-  decreasing proofs Lean extracted for `f` (in particular the user's `decreasing_by`),
-  `omega`, or `decreasing_tactic`;
-* every call-free expression is simplified while it is translated (`Capture/Optimize.lean`),
-  so that it is in the optimised normal form the grammar requires; the normal-form proofs are
-  `(by decide)`;
-* calls of other user-defined functions: an `@[inlinable]` function is inlined (a recursive one
-  becomes a local `fix` at the call site); any other function becomes an entry of the global
-  context of the program (`Globals.defn`, callees first, each captured once) and its calls are
-  `Expr.gCall i args` (`globalsStx`, `globalDefStx`).  Functions with function parameters,
-  members of a mutual group and functions calling themselves in a function argument are always
-  captured at the call site.
+* a recursive `f` is the last global function of the program, called once by the main
+  statement (`PTerm.ofFix R wf body`); its relation and well-foundedness proof are the ones Lean
+  built for `f` (from `WellFounded.fix`), pulled back along the packing of the arguments, and
+  each `by wf_dec …` proves that one recursive call goes down, from the path condition, using the
+  decreasing proofs Lean extracted for `f` (in particular the user's `decreasing_by`), `omega`,
+  or `decreasing_tactic`;
+* the **global context** is built on demand (`registerGlobal`): the first call of a function
+  that is not inlined adds it to the global context (after the global functions its own body
+  calls), and every call is `Expr.gCall i args`.  Global functions are the functions not marked
+  `@[inlinable]`, and the `@[inlinable]` functions that cannot be loops: those with non-tail
+  recursive calls, members of a group of mutually recursive functions (one global function with
+  a tag parameter), functions calling themselves inside a function argument (one global
+  function together with the specialised function), and the specialised copies of functions
+  with function arguments that are not tail-recursive;
+* a tail-recursive `@[inlinable]` function, and a tail-recursive function with function
+  arguments (e.g. the loop of a `for`), is inlined at each call site as a **recursive join
+  point** (a loop inside the caller, `loopStx`);
+* calls with known arguments (closed calls of user functions, `@[inlinable]` or not) are
+  evaluated at capture time and replaced by their values (`foldCall?`, `inlineCalls`);
+  `wf_agree` proves these equations by kernel evaluation (`wfFoldCalls`).
 -/
 
 namespace WFLang.Capture
@@ -53,257 +44,39 @@ open Lean Meta Elab Term
 open WFLang.Meta
 open WFLang.Translate
 
-/-- Is `e` a control-flow node whose branches must not be evaluated eagerly? -/
-def isControl (e : Lean.Expr) : MetaM Bool := do
-  if e.isAppOf ``ite || e.isAppOf ``dite || e.isAppOf ``cond || e.isAppOf ``Nat.casesOn ||
-    e.isAppOf ``Bool.casesOn || e.isAppOf ``List.casesOn || e.isAppOf ``and ||
-    e.isAppOf ``or then return true
-  if let .const n _ := e.getAppFn then return (← isMatcher n) || isSparseCasesOn n
-  return false
+/-- An entry of the global context under construction: the function it captures (`key`), how
+it is called (`info`), and its definition (signature `⟨params, ret, pre, post⟩`, relation,
+well-foundedness proof, body). -/
+structure GEntry where
+  key : FnRef
+  info : GInfo
+  fnStx : Stx
+  R : Stx
+  wf : Stx
+  body : Stx
 
-/-- Are two references to specialised copies of the same function equal (up to definitional
-equality of their function arguments)? -/
-def specRefEq (a b : FnRef) : MetaM Bool := do
-  if a.beq b then return true
-  unless a.name == b.name && a.spec.size == b.spec.size && a.extraTys.size == b.extraTys.size do
-    return false
-  for (x, y) in a.extraTys.zip b.extraTys do
-    unless ← isDefEq x y do return false
-  for (x, y) in a.spec.zip b.spec do
-    unless ← isDefEq x y do return false
-  return true
+/-- The global context under construction: its entries (in order: each entry may only call the
+entries before it), the functions whose definition is being captured (to detect cycles), and the
+global functions by attribute (not `@[inlinable]`) reachable from the captured function. -/
+structure GReg where
+  entries : IO.Ref (Array GEntry)
+  busy : IO.Ref (Array FnRef)
+  names : Array (Name × FnSig)
 
-/-- Inside the local recursive function capturing `f` together with the specialised `g` (see
-`HOInfo`): if `e` is a call of `f` or of the specialised `g`, the arguments of the corresponding
-recursive call (`tag :: f's arguments ++ g's lifted variables ++ g's arguments`, `none` for
-padding). -/
-def hoSelfArgs? (c : Ctx) (h : HOInfo) (e : Lean.Expr) : MetaM (Option (List (Option Lean.Expr))) := do
-  let nF := h.fSig.argTys.length
-  let nE := h.gSig.nExtra
-  let nG := h.gSig.argTys.length - nE
-  if e.isAppOf h.fName && e.getAppNumArgs == h.fSig.arity then
-    return some (some (mkNatLit 0) :: (objArgs h.fSig e.getAppArgs).map some ++
-      List.replicate (nE + nG) none)
-  let .const g lvls := e.getAppFn | return none
-  unless g == h.gRef.name do return none
-  let args := e.getAppArgs
-  unless args.size == h.gSig.arity do
-    throwError "#lean_wf_func_to_term: partial application of {g} (function values are not supported){indentExpr e}"
-  let (ref, ys) ← mkSpecRef g lvls args (← specPosAt (mkConst g lvls) args)
-  unless ← specRefEq ref h.gRef do
-    throwError "#lean_wf_func_to_term: {g} is called with several different function arguments that call {h.fName} (not supported){indentExpr e}"
-  for y in ys do
-    unless c.vars.contains y.fvarId! do
-      throwError "#lean_wf_func_to_term: the function argument of {g} uses {y}, which is not a variable of the program"
-  return some (some (mkNatLit 1) :: List.replicate nF none ++ ys.toList.map some ++
-    (objArgs h.gSig args).map some)
+/-- Save the state of the global context; the action returned restores it. -/
+def GReg.checkpoint (reg : GReg) : TermElabM (TermElabM Unit) := do
+  let es ← reg.entries.get
+  let bs ← reg.busy.get
+  return do reg.entries.set es; reg.busy.set bs
 
-/-- The de Bruijn index (`PCL.JVar`) of a join point defined when `v0` variables were in scope,
-from a point with `vc` variables in scope, where `later` (innermost first) are the numbers of
-variables in scope at the definitions of the join points defined after it: each join point
-defined after it is crossed by `there`, each variable bound after it by `wk`. -/
-partial def jvarStx (later : List Nat) (vc v0 : Nat) : MetaM Stx :=
-  match later with
-  | l :: ls =>
-    if l == vc then do `(WFLang.PCL.JVar.there $(← jvarStx ls vc v0))
-    else do `(WFLang.PCL.JVar.wk $(← jvarStx later (vc - 1) v0))
-  | [] =>
-    if vc ≤ v0 then `(WFLang.PCL.JVar.here)
-    else do `(WFLang.PCL.JVar.wk $(← jvarStx [] (vc - 1) v0))
+/-- A fresh global context, for the capture of `root` (`collectGlobals`). -/
+def GReg.new (root : FnRef) : TermElabM GReg := do
+  let extra := root.spec.foldl (fun acc a => acc ++ a.getUsedConstants) #[]
+  let names ← (← collectGlobals root.name extra).mapM fun (g : Name) => do
+    return (g, ← fnSig { name := g })
+  return { entries := ← IO.mkRef #[], busy := ← IO.mkRef #[], names }
 
-/-- Must the continuation of a non-tail `if`/`match` be duplicated into its branches rather
-than become a join point?  Only when a call may have a postcondition (a function with a subtype
-result), which the rest of the computation may need: the parameter of a join point does not
-record which call produced it. -/
-def needsDup (c : Ctx) : Bool :=
-  c.hasPost || c.fnSig?.any (·.subtypeRet) || c.callees.any (·.2.1.subtypeRet) ||
-    c.globals.any (·.2.subtypeRet)
-
-/-- Put the values `vs` in the `some` positions of `xs`. -/
-def fillOpt : List (Option Lean.Expr) → List Lean.Expr → List (Option Lean.Expr)
-  | [], _ => []
-  | none :: xs, vs => none :: fillOpt xs vs
-  | some _ :: xs, v :: vs => some v :: fillOpt xs vs
-  | some x :: xs, [] => some x :: fillOpt xs []
-
-mutual
-/-- Evaluate the calls inside `e` first (A-normal form), then continue with the call-free
-remainder. -/
-partial def lift (c : Ctx) (e : Lean.Expr) (k : Ctx → Lean.Expr → TermElabM Stx) :
-    TermElabM Stx := do
-  let e := (← instantiateMVars e).consumeMData.headBeta
-  if !hasCall c e then return ← k c e
-  -- `let x := v; b` whose value calls: evaluate `v` once, then `b`
-  if e.isLet && hasCall c e.letValue! then
-    return ← lift c e.letValue! fun c v => lift c (e.letBody!.instantiate1 v) k
-  if let some e' ← unfoldStep? e then return ← lift c e' k
-  -- a well-founded `while` loop: `let v := while … in k`
-  if e.isAppOfArity ``WFLang.whileWF 9 then return ← whileStx c e k
-  -- a call of `f` or of the specialised `g`, in the local recursive function capturing both
-  if let some h := c.ho then
-    if let some args ← hoSelfArgs? c h e then
-      return ← liftMany c (args.filterMap id) [] fun c vals => do
-        let retTy ← inferType e
-        withLocalDeclD `r retTy fun v => do
-          let rest ← k { c with vars := v.fvarId! :: c.vars } v
-          `(WFLang.PCL.Expr.fixSelfCall $(← pargsOpt c (fillOpt args vals)) (by decide) $(← decStx c)
-              (fun _ _ => trivial) $rest)
-  if e.isApp && (e.getAppFn.isConstOf c.fn || c.group.any e.getAppFn.isConstOf) then
-    let some sig := c.fnSig? |
-      throwError "#lean_wf_func_to_term: recursive call of {c.fn} outside its definition"
-    -- in a group of mutually recursive functions: the tag of the callee comes first
-    let tag := (c.group.findIdx? e.getAppFn.isConstOf).map mkNatLit
-    unless e.getAppNumArgs == sig.arity do
-      throwError "#lean_wf_func_to_term: partial application of {c.fn} (function values are not supported){indentExpr e}"
-    -- a specialised copy: the recursive call must pass the same function arguments
-    for (p, v) in sig.specPos.zip c.selfSpec do
-      unless ← isDefEq e.getAppArgs[p]! v do
-        throwError "#lean_wf_func_to_term: the recursive call changes the function argument of {c.fn}{indentExpr e}"
-    return ← liftMany c (tag.toList ++ c.selfExtra ++ objArgs sig e.getAppArgs) [] fun c args => do
-      let retTy ← inferType e
-      withLocalDeclD `r retTy fun v => do
-        let rest ← k { c with vars := v.fvarId! :: c.vars } v
-        `(WFLang.PCL.Expr.fixSelfCall $(← pargs c args) (by decide) $(← decStx c) $(← hpreStx c sig)
-            $rest)
-  -- a call of a global function: `let v := g args in k`, with `g` read from the global context
-  if let some (j, sig) := globalCall? c e then
-    return ← liftMany c (objArgs sig e.getAppArgs) [] fun c args => do
-      let retTy ← inferType e
-      withLocalDeclD `r retTy fun v => do
-        let rest ← k { c with vars := v.fvarId! :: c.vars } v
-        `(WFLang.PCL.Expr.gCall $(← gvarStx c j) $(← pargs c args) (by decide) $(← hpreStx c sig)
-            $rest)
-  -- a call of another recursive function: a nested `fix` node
-  if let some (sig, head) := calleeCall? c e then
-    return ← liftMany c ((sig.tag.map mkNatLit).toList ++ objArgs sig e.getAppArgs) [] fun c args => do
-      let retTy ← inferType e
-      withLocalDeclD `r retTy fun v => do
-        let rest ← k { c with vars := v.fvarId! :: c.vars } v
-        let pa ← pargsOpt c (args.map some ++ List.replicate sig.pad none)
-        `($head (WFLang.PCL.Expr.fnCall WFLang.PCL.FnVar.here $pa (by decide) $(← hpreStx c sig) $rest))
-  -- a call of a function with function arguments: a nested `fix` node capturing the copy
-  -- specialised to these arguments, which takes the lifted variables as extra arguments
-  if let some (ref, ys) ← specCall? c e then
-    let sig ← fnSig ref
-    let head ← c.specHead ref
-    return ← liftMany c (ys.toList ++ objArgs sig e.getAppArgs) [] fun c args => do
-      let retTy ← inferType e
-      withLocalDeclD `r retTy fun v => do
-        let rest ← k { c with vars := v.fvarId! :: c.vars } v
-        `($head (WFLang.PCL.Expr.fnCall WFLang.PCL.FnVar.here $(← pargs c args) (by decide) $(← hpreStx c sig)
-          $rest))
-  if e.isApp && !(← isControl e) && !hasCall c e.getAppFn then
-    return ← liftMany c e.getAppArgs.toList [] fun c args => k c (mkAppN e.getAppFn args.toArray)
-  -- a control-flow node containing a call, in non-tail position: the rest of the computation
-  -- (the continuation `k`) becomes a join point `j`, then the test is evaluated, and each
-  -- branch ends with `jump j v` (strict A-normal form: `ite` and `join` stay in tail position,
-  -- and `k` is written once)
-  if let some (t, a, b) ← branch? e then
-    if needsDup c || !wfLang.joinPoints.get (← getOptions) then
-      -- the continuation may need the postconditions of the calls made in the branches:
-      -- it is duplicated into both branches instead
-      return ← lift c t.expr fun c cnd => do
-        iteStx c (t.withExpr cnd) (lift c a k) (lift c b k)
-    let d := c.joins.length
-    let v0 := c.vars.length
-    let ty ← inferType e
-    let body ← withLocalDeclD `v ty fun v => k { c with vars := v.fvarId! :: c.vars } v
-    let jumpK : Ctx → Lean.Expr → TermElabM Stx := fun c' v => do
-      let later := c'.joins.take (c'.joins.length - d - 1)
-      `(WFLang.PCL.Expr.jump $(← jvarStx later c'.vars.length v0) $(← pexpr c' v) (by decide)
-          (fun _ _ => trivial) (fun _ _ _ h => h))
-    let m ← lift { c with joins := v0 :: c.joins } t.expr fun c cnd => do
-      iteStx c (t.withExpr cnd) (lift c a jumpK) (lift c b jumpK)
-    return ← `(WFLang.PCL.Expr.join $(← tyStx ty) (fun _ _ => True) $body $m)
-  -- a call of another recursive function inside a control-flow node that is not a branch:
-  -- evaluate it first (all functions are total, so this does not change the result)
-  let hoistable (x : Lean.Expr) : Bool :=
-    ((calleeCall? c x).isSome || (globalCall? c x).isSome || c.specFns.any (x.isAppOf ·)) &&
-      !x.hasLooseBVars &&
-      (x.find? (·.isAppOf c.fn)).isNone
-  if let some s := e.find? hoistable then
-    return ← lift c s fun c v =>
-      lift c (e.replace fun x => if x == s then some v else none) k
-  throwError "#lean_wf_func_to_term: recursive call in an unsupported position{indentExpr e}"
-
-/-- `WFLang.whileWF R wf inv cond body step init hinit` (a well-founded `while` loop) in
-non-tail position, followed by the rest of the computation `k`:
-`Expr.whileLoop s init c R wf inv hinit (ret body) (k v)`.  The initial state is evaluated first
-(it may contain calls); the test and the body must be call-free.  The relation, the invariant and
-the proofs are the Lean ones, as functions of the environment (`envFunStx`): the proof that the
-body keeps the invariant and goes down is the Lean proof `step`, and the initial state satisfies
-the invariant by the Lean proof `hinit`. -/
-partial def whileStx (c : Ctx) (e : Lean.Expr) (k : Ctx → Lean.Expr → TermElabM Stx) :
-    TermElabM Stx := do
-  let args := e.getAppArgs
-  let (β, R, wf, inv, cf, bf, step, init, hb) :=
-    (args[0]!, args[1]!, args[2]!, args[3]!, args[4]!, args[5]!, args[6]!, args[7]!, args[8]!)
-  lift c init fun c init' => do
-    let sTy ← tyStx β
-    let (cStx, bStx) ← withLocalDeclD `x β fun x => do
-      let c' := { c with vars := x.fvarId! :: c.vars }
-      let cx := (mkApp cf x).headBeta
-      let bx := (mkApp bf x).headBeta
-      if hasCall c' cx || hasCall c' bx then
-        throwError "#lean_wf_func_to_term: a call (or a loop) inside the test or the body of a `while` loop is not supported{indentExpr e}"
-      return (← pexpr c' cx, ← pexpr c' bx)
-    let initStx ← pexpr c init'
-    let RStx ← envFunStx c R
-    let wfStx ← envFunStx c wf
-    let invStx ← envFunStx c inv
-    let stepStx ← envFunStx c step
-    -- `hinit` of the Lean loop, for the initial state (after its calls have been evaluated)
-    let hbStx ← envFunStx c (hb.replace fun x => if x == init then some init' else none)
-    let hinit ← `(fun e _ => by
-      have h := $hbStx e
-      first
-        | exact h
-        | (simp only [WFLang.PExprs.eval, WFLang.PExpr.eval, WFLang.Var.get, WFLang.BinOp.eval,
-          WFLang.UnOp.eval, WFLang.Ty.beq, WFLang.Ty.default] at h ⊢; first | exact h | simpa using h)
-        | simp_all [WFLang.PExprs.eval, WFLang.PExpr.eval, WFLang.Var.get, WFLang.BinOp.eval,
-          WFLang.UnOp.eval, WFLang.Ty.beq, WFLang.Ty.default])
-    let post ← `(fun e g => by
-      obtain ⟨x, e⟩ := e
-      have hc : _ = true := g.2.2
-      have h := $stepStx e x g.2.1 (by first | exact hc | simpa [WFLang.PExprs.eval, WFLang.PExpr.eval, WFLang.Var.get, WFLang.BinOp.eval,
-          WFLang.UnOp.eval, WFLang.Ty.beq, WFLang.Ty.default] using hc)
-      first
-        | exact h
-        | simpa [WFLang.PExprs.eval, WFLang.PExpr.eval, WFLang.Var.get, WFLang.BinOp.eval,
-          WFLang.UnOp.eval, WFLang.Ty.beq, WFLang.Ty.default] using h)
-    let rest ← withLocalDeclD `v β fun v => k { c with vars := v.fvarId! :: c.vars } v
-    `(WFLang.PCL.Expr.whileLoop $sTy $initStx (by decide) $cStx (by decide) $RStx $wfStx $invStx
-        $hinit (WFLang.PCL.Expr.ret $bStx (by decide) $post) $rest)
-
-partial def liftMany (c : Ctx) (es : List Lean.Expr) (acc : List Lean.Expr)
-    (k : Ctx → List Lean.Expr → TermElabM Stx) : TermElabM Stx :=
-  match es with
-  | [] => k c acc.reverse
-  | e :: es => lift c e fun c e' => liftMany c es (e' :: acc) k
-end
-
-/-- `ret e`, with the proof of the postcondition (if any). -/
-def retStx (c : Ctx) (e : Lean.Expr) : TermElabM Stx := do
-  `(WFLang.PCL.Expr.ret $(← pexpr c e) (by decide) $(← postStx c))
-
-/-- A Lean expression in tail position, as a statement. -/
-partial def stmt (c : Ctx) (e : Lean.Expr) : TermElabM Stx := do
-  let e := (← instantiateMVars e).consumeMData.headBeta
-  if !hasCall c e then return ← retStx c e
-  if e.isLet && hasCall c e.letValue! then
-    return ← lift c e.letValue! fun c v => stmt c (e.letBody!.instantiate1 v)
-  if let some e' ← unfoldStep? e then return ← stmt c e'
-  if let some (t, a, b) ← branch? e then
-    return ← lift c t.expr fun c cnd => do
-      iteStx c (t.withExpr cnd) (stmt c a) (stmt c b)
-  lift c e retStx
-
-/-- The recursive functions with function parameters called in `rhs` (to be specialised at each
-call site). -/
-def specFnsIn (fn : Name) (rhs : Lean.Expr) : MetaM (Array Name) :=
-  rhs.getUsedConstants.filterM (isSpecFn fn)
-
-/-- The pieces of the local recursive function capturing `fn`: its parameter types, result
+/-- The pieces of a global function capturing a Lean function: its parameter types, result
 type, relation, well-foundedness proof, precondition, postcondition and body. -/
 structure FixParts where
   gam : Stx
@@ -313,20 +86,65 @@ structure FixParts where
   pre : Stx
   post : Stx
   body : Stx
-  /-- for the local recursive function capturing a function together with a specialised
-  function whose function argument calls it (`HOInfo`): the number of padded parameters after
-  the function's own ones (it is called with tag `0`) -/
+  /-- for the global function capturing a function together with a specialised function whose
+  function argument calls it (`HOInfo`): the number of padded parameters after the function's
+  own ones (it is called with tag `0`) -/
   hoPad : Option Nat := none
 
 mutual
-/-- The pieces of the local recursive function capturing the recursive Lean function `fn`.
-`visiting` are the functions whose capture is in progress. -/
-partial def fixParts (f : FnRef) (visiting : List Name := []) (gls : Array (Name × FnSig) := #[]) :
-    TermElabM FixParts := do
-  if !f.group.isEmpty then return ← groupParts f.group visiting gls
+/-- The position of the global function capturing `key` in the global context `reg`: an
+existing entry, or a new one, added after the global functions its body calls. -/
+partial def registerGlobal (reg : GReg) (key : FnRef) : TermElabM GInfo := do
+  for e in ← reg.entries.get do
+    if ← specRefEq e.key key then return e.info
+  for b in ← reg.busy.get do
+    if ← specRefEq b key then
+      throwError "#lean_wf_func_to_term: {key.name} calls itself through other global functions (mutual recursion outside a `mutual` block is not supported)"
+  reg.busy.modify (·.push key)
+  try
+    let (info, fnStx, R, wf, body) ← globalPieces reg key
+    let pos := (← reg.entries.get).size
+    let body ← resolveGRefs pos body
+    let info := { info with pos }
+    reg.entries.modify (·.push { key, info, fnStx, R, wf, body := ⟨body⟩ })
+    return info
+  finally
+    reg.busy.modify (·.pop)
+
+/-- The definition of the global function capturing `key`: a recursive function (or group, or
+specialised copy) is captured by `fixParts`; a non-recursive one has the empty relation
+`emptyRelation` and its body is captured like a non-recursive program. -/
+partial def globalPieces (reg : GReg) (key : FnRef) :
+    TermElabM (GInfo × Stx × Stx × Stx × Stx) := do
+  if !key.group.isEmpty || key.isSpec || (← isWFRec key.name) then
+    let p ← fixParts key reg
+    let info : GInfo := match p.hoPad with
+      | some n => { pos := 0, tag0 := true, pad := n }
+      | none => { pos := 0 }
+    return (info, ← `(⟨$(p.gam), $(p.ret), $(p.pre), $(p.post)⟩), p.R, p.wf, p.body)
+  let g := key.name
+  let sig ← fnSig key
+  withEqnRhs' key fun ys xs rhs => do
+    let gC ← mkConstWithLevelParams g
+    let (pre?, post?) ← prePostOf key xs (← inferType (mkAppN gC xs)) ys
+    let c : Ctx := { (Ctx.ofParams g xs sig ys) with
+      callees := ← calleeKinds g rhs, fnSig? := none, hasPost := post?.isSome,
+      specFns := ← specFnsIn g rhs, gref := registerGlobal reg, gcheckpoint := reg.checkpoint, globals := reg.names }
+    let body ← stmt c rhs
+    let pre ← match pre? with
+      | some p => exprToSyntax p
+      | none => `(fun _ => True)
+    let post ← match post? with
+      | some p => exprToSyntax p
+      | none => `(fun _ _ => True)
+    return ({ pos := 0 },
+      ← `(⟨$(← exprToSyntax (mkTyList sig.argTys)), $(← exprToSyntax sig.retTy), $pre, $post⟩),
+      ← `(emptyRelation), ← `(emptyWf.wf), body)
+
+/-- The pieces of the global function capturing the recursive Lean function `f`. -/
+partial def fixParts (f : FnRef) (reg : GReg) : TermElabM FixParts := do
+  if !f.group.isEmpty then return ← groupParts f.group reg
   let fn := f.name
-  if visiting.contains fn then
-    throwError "#lean_wf_func_to_term: mutual recursion through {fn} is not supported"
   let sig ← fnSig f
   let some (R, wf, lemmasE) ← closedFixOf f |
     throwError "#lean_wf_func_to_term: {fn} is not defined by well-founded recursion"
@@ -334,17 +152,16 @@ partial def fixParts (f : FnRef) (visiting : List Name := []) (gls : Array (Name
   let decTac ← `(tactic| wf_dec [WFLang.PCL.Self.top, WFLang.PCL.Self.push])
   let res ← withEqnRhs' f fun ys xs rhs => do
     let (pre?, post?) ← prePostOf f xs (← inferType (mkAppN (← f.const) xs)) ys
-    let callees ← calleeHeads fn rhs (fn :: visiting) gls
     let c : Ctx := { (Ctx.ofParams fn xs sig ys) with
-      lemmas := lemmas, decTac := decTac, callees := callees, hasPost := post?.isSome,
-      specFns := ← specFnsIn fn rhs, specHead := fun r => fixHead r (fn :: visiting) gls,
-      globals := gls }
+      lemmas := lemmas, decTac := decTac, callees := ← calleeKinds fn rhs,
+      hasPost := post?.isSome, specFns := ← specFnsIn fn rhs, gref := registerGlobal reg, gcheckpoint := reg.checkpoint,
+      globals := reg.names }
     -- a call of a function with a function argument that calls `fn`: `fn` and the specialised
     -- function are captured together
     if let some gRef ← hoRefIn? f c rhs then
       unless pre?.isNone && post?.isNone do
         throwError "#lean_wf_func_to_term: {fn} calls itself inside a function argument; this is not supported together with proof parameters or a subtype result"
-      return Sum.inr (← hoParts fn sig xs rhs c gRef R wf visiting)
+      return Sum.inr (← hoParts fn sig xs rhs c gRef R wf)
     let body ← stmt c rhs
     let pre ← match pre? with
       | some p => exprToSyntax p
@@ -367,17 +184,19 @@ partial def hoRefIn? (f : FnRef) (c : Ctx) (rhs : Lean.Expr) : TermElabM (Option
   unless ← hoCandidate f.name rhs do return none
   let r ← IO.mkRef none
   let saved ← saveState
+  let restoreG ← c.gcheckpoint
   try discard <| stmt { c with hoFound := some r } rhs catch _ => pure ()
   restoreState saved
+  restoreG
   r.get
 
-/-- The pieces of the local recursive function capturing `fn` (signature `sig`, parameters
-`xs`, right-hand side `rhs`, relation `Rf`) together with the copy `gRef` of a function `g`
+/-- The pieces of the global function capturing `fn` (signature `sig`, parameters `xs`,
+right-hand side `rhs`, relation `Rf`) together with the copy `gRef` of a function `g`
 specialised to a function argument that calls `fn` (see `HOInfo`).  Its parameters are
 `tag :: fn's parameters ++ g's lifted variables ++ g's parameters`, its body
 `if tag = 0 then ⟦rhs⟧ else ⟦rhs of g⟧`, and its relation `WFLang.hoRel` (`hoRelOf`). -/
 partial def hoParts (fn : Name) (sig : FnSig) (xs : Array Lean.Expr) (rhs : Lean.Expr) (c : Ctx)
-    (gRef : FnRef) (Rf wff : Lean.Expr) (visiting : List Name) : TermElabM FixParts := do
+    (gRef : FnRef) (Rf wff : Lean.Expr) : TermElabM FixParts := do
   let gSig ← fnSig gRef
   unless ← isDefEq gSig.retTy sig.retTy do
     throwError "#lean_wf_func_to_term: {fn} calls itself inside a function argument of {gRef.name}, whose result type differs from that of {fn} (not supported)"
@@ -393,7 +212,7 @@ partial def hoParts (fn : Name) (sig : FnSig) (xs : Array Lean.Expr) (rhs : Lean
       let fObjs := sig.objPos.map (xs[·]!)
       let gObjs := gSig.objPos.map (xsG[·]!)
       let vars := (t :: fObjs ++ ysG.toList ++ gObjs).map (·.fvarId!)
-      let gCallees ← calleeHeads gRef.name rhsG (fn :: gRef.name :: visiting) c.globals
+      let gCallees ← calleeKinds gRef.name rhsG #[fn]
       let gSpecFns ← specFnsIn gRef.name rhsG
       let decTac ← `(tactic| wf_dec_ho [WFLang.PCL.Self.top, WFLang.PCL.Self.push])
       let c' : Ctx := { c with
@@ -410,20 +229,16 @@ partial def hoParts (fn : Name) (sig : FnSig) (xs : Array Lean.Expr) (rhs : Lean
            pre := ← `(fun _ => True), post := ← `(fun _ _ => True), body,
            hoPad := some gSig.argTys.length }
 
-/-- The pieces of the local recursive function capturing a group of mutually recursive functions
+/-- The pieces of the global function capturing a group of mutually recursive functions
 `group` (with the same parameter and result types): its first parameter is a tag `t`, and its
 body is `if t = 0 then ⟦rhs of group[0]⟧ else if t = 1 then … else ⟦rhs of group[k-1]⟧`, where a
 call of `group[i]` is a recursive call with tag `i`. -/
-partial def groupParts (group : Array Name) (visiting : List Name)
-    (gls : Array (Name × FnSig) := #[]) : TermElabM FixParts := do
-  if group.any visiting.contains then
-    throwError "#lean_wf_func_to_term: mutual recursion through {group} is not supported"
+partial def groupParts (group : Array Name) (reg : GReg) : TermElabM FixParts := do
   let ref : FnRef := { name := group[0]!, group }
   let sig ← fnSig ref
   let (R, wf, lemmas) ← groupFixOf group
   let lemmas ← lemmas.mapM exprToSyntax
   let decTac ← `(tactic| wf_dec_tag [WFLang.PCL.Self.top, WFLang.PCL.Self.push])
-  let visiting' := group.toList ++ visiting
   let body ← withEqnRhs group[0]! fun xs _ => do
     withLocalDeclD `tag (Lean.mkConst ``Nat) fun t => do
       let rhss ← group.mapM fun g => do
@@ -435,16 +250,15 @@ partial def groupParts (group : Array Name) (visiting : List Name)
       let mut callees := #[]
       let mut specFns := #[]
       for (g, rhs) in group.zip rhss do
-        for (h, hs, hd) in ← calleeHeads g rhs visiting' gls do
-          unless group.contains h || callees.any (·.1 == h) do callees := callees.push (h, hs, hd)
+        for (h, hs, hk) in ← calleeKinds g rhs group do
+          unless callees.any (·.1 == h) do callees := callees.push (h, hs, hk)
         for h in ← specFnsIn g rhs do
           unless specFns.contains h do specFns := specFns.push h
       let objs := sig.objPos.map (xs[·]!)
       let vars := (t :: objs).map (·.fvarId!)
-      let hd : FnRef → TermElabM Stx := fun r => fixHead r visiting' gls
-      let c0 : Ctx := { fn := group[0]!, vars := vars, fnSig? := some sig, globals := gls }
+      let c0 : Ctx := { fn := group[0]!, vars := vars, fnSig? := some sig, globals := reg.names }
       let c : Ctx := { c0 with group := group, lemmas := lemmas, decTac := some decTac }
-      let c : Ctx := { c with callees := callees, specFns := specFns, specHead := hd }
+      let c : Ctx := { c with callees := callees, specFns := specFns, gref := registerGlobal reg, gcheckpoint := reg.checkpoint }
       let mut acc ← stmt c rhss.back!
       for i in (List.range (group.size - 1)).reverse do
         let tst ← test c (.prop (← mkEq t (mkNatLit i)))
@@ -453,130 +267,75 @@ partial def groupParts (group : Array Name) (visiting : List Name)
   return { gam := ← exprToSyntax (mkTyList sig.argTys), ret := ← exprToSyntax sig.retTy,
            R := ← exprToSyntax R, wf := ← exprToSyntax wf, pre := ← `(fun _ => True),
            post := ← `(fun _ _ => True), body }
-
-/-- The head `PCL.Expr.fix ps r R wf pre post body` (still to be applied to its scope,
-`fnCall FnVar.here args hpre k`) of the local recursive function capturing
-`fn` (still to be applied to the arguments, the precondition proof and the continuation). -/
-partial def fixHead (fn : FnRef) (visiting : List Name := []) (gls : Array (Name × FnSig) := #[]) :
-    TermElabM Stx := do
-  let p ← fixParts fn visiting gls
-  if p.hoPad.isSome then
-    throwError "#lean_wf_func_to_term: {fn.name} calls itself inside a function argument; calling such a function from another function is not supported (capture it on its own)"
-  `(WFLang.PCL.Expr.fix $(p.gam) $(p.ret) $(p.R) $(p.wf) $(p.pre) $(p.post) $(p.body))
-
-/-- The recursive functions called by `rhs` (other than `fn`) that are captured at their call
-sites (`localRecCallees`: `@[inlinable]` ones, groups of mutually recursive functions, functions
-calling themselves in a function argument), with their `fix` heads.  `gls` are the global
-functions visible. -/
-partial def calleeHeads (fn : Name) (rhs : Lean.Expr) (visiting : List Name)
-    (gls : Array (Name × FnSig) := #[]) : TermElabM (Array (Name × FnSig × Stx)) := do
-  -- (the functions being captured, e.g. the other members of a group of mutually recursive
-  -- functions, are not callees)
-  ((← localRecCallees fn rhs).filter (!visiting.contains ·)).mapM fun (g : Name) => do
-    -- a member of a group of mutually recursive functions: the node capturing the group, called
-    -- with the tag of `g`
-    if let some grp ← mutualGroup? g then
-      let sig ← fnSig g
-      return (g, { sig with tag := grp.findIdx? (· == g) },
-        ← fixHead { name := grp[0]!, group := grp } visiting gls)
-    let p ← fixParts { name := g } visiting gls
-    let head ← `(WFLang.PCL.Expr.fix $(p.gam) $(p.ret) $(p.R) $(p.wf) $(p.pre) $(p.post) $(p.body))
-    let sig ← fnSig { name := g }
-    if let some n := p.hoPad then
-      -- `g` calls itself inside a function argument: its node is called with tag `0` and
-      -- padding
-      return (g, { sig with tag := some 0, pad := n }, head)
-    return (g, sig, head)
 end
 
-/-- Build the surface syntax of `PTerm.ofFix R wf (⟦rhs of f.eq_def⟧)` (or of the body alone
-if `f` is not recursive). -/
-def captureStx (fn : FnRef) (gs : Stx) (gls : Array (Name × FnSig)) : TermElabM Stx := do
-  let prog (main : Stx) : TermElabM Stx := `(WFLang.PCL.PTerm.mk $gs $main)
+/-- The syntax of the global context `reg` (`Globals.defn … (Globals.defn Globals.nil …)`). -/
+def GReg.stx (reg : GReg) : TermElabM Stx := do
+  let mut gs ← `(WFLang.PCL.Globals.nil)
+  for e in ← reg.entries.get do
+    gs ← `(WFLang.PCL.Globals.defn $gs $(e.fnStx) $(e.R) $(e.wf) $(e.body))
+  return gs
+
+/-- The number of entries of the global context `reg`. -/
+def GReg.size (reg : GReg) : TermElabM Nat := return (← reg.entries.get).size
+
+/-- The main statement `let v := g args in v`, a call of the global function `gi` capturing the
+recursive function `fn` (with the tag `tag` and the padding of `gi`) on the parameters. -/
+def callMainStx (fn : FnRef) (gi : GInfo) (tag : Option Nat) (reg : GReg) : TermElabM Stx := do
+  let sig ← fnSig fn
+  withEqnRhs fn fun xs _ => do
+    let c := { Ctx.ofParams fn.name xs sig with globals := reg.names }
+    let tags := (if gi.tag0 then [mkNatLit 0] else []) ++ (tag.map mkNatLit).toList
+    let args ← pargsOpt c ((tags ++ objArgs sig xs).map some ++ List.replicate gi.pad none)
+    let retTy ← inferType (mkAppN (← fn.const) xs)
+    withLocalDeclD `r retTy fun v => do
+      let c' := { c with vars := v.fvarId! :: c.vars }
+      `(WFLang.PCL.Expr.gCall $(gvarStx gi.pos) $args (by decide) $(← hpreStx c sig)
+          $(← retStx c' v))
+
+/-- Build the surface syntax of the program capturing `fn`: `PTerm.ofFix gs R wf ⟦rhs⟧` for a
+recursive function (the function is the last global function, called by the main statement),
+`PTerm.mk gs (call of the global function)` for a member of a group or a function captured
+together with a specialised function, and `PTerm.mk gs ⟦rhs⟧` for a non-recursive function. -/
+def captureStx (fn : FnRef) : TermElabM Stx := do
+  let reg ← GReg.new fn
+  let prog (main : Stx) : TermElabM Stx := do
+    let main ← resolveGRefs (← reg.size) main
+    `(WFLang.PCL.PTerm.mk $(← reg.stx) $(⟨main⟩))
   let isRec ← withEqnRhs fn fun _ rhs => return hasCall { fn := fn.name, vars := [] } rhs
   if let some grp ← mutualGroup? fn.name then
-    -- a member of a group of mutually recursive functions: one call of the node capturing the
-    -- group, with the tag of `fn`
-    let head ← fixHead { name := grp[0]!, group := grp } [] gls
-    let sig ← fnSig fn.name
-    return ← withEqnRhs fn fun xs _ => do
-      let c := { Ctx.ofParams fn.name xs sig with globals := gls }
-      let args ← pargs c (mkNatLit (grp.findIdx? (· == fn.name)).get! :: objArgs sig xs)
-      let retTy ← inferType (mkAppN (← mkConstWithLevelParams fn.name) xs)
-      withLocalDeclD `r retTy fun v => do
-        let c' := { c with vars := v.fvarId! :: c.vars }
-        prog (← `($head (WFLang.PCL.Expr.fnCall WFLang.PCL.FnVar.here $args (by decide) $(← hpreStx c sig)
-          $(← retStx c' v))))
+    -- a member of a group of mutually recursive functions: one call of the global function
+    -- capturing the group, with the tag of `fn`
+    let gi ← registerGlobal reg { name := grp[0]!, group := grp }
+    return ← prog (← callMainStx fn gi (grp.findIdx? (· == fn.name)) reg)
   if isRec && (← isWFRec fn.name) then
-    let p ← fixParts fn [] gls
+    let p ← fixParts fn reg
     if let some n := p.hoPad then
-      -- `fn` captured together with a specialised function: one call of the local recursive
-      -- function, with tag `0`
-      let sig ← fnSig fn
-      return ← withEqnRhs fn fun xs _ => do
-        let c := { Ctx.ofParams fn.name xs sig with globals := gls }
-        let args ← pargsOpt c (some (mkNatLit 0) :: (objArgs sig xs).map some ++
-          List.replicate n none)
-        prog (← `(WFLang.PCL.Expr.fix $(p.gam) $(p.ret) $(p.R) $(p.wf) $(p.pre) $(p.post) $(p.body)
-            (WFLang.PCL.Expr.fnCall WFLang.PCL.FnVar.here $args (by decide) (fun _ _ => trivial)
-              (WFLang.PCL.Expr.ret (WFLang.PExpr.var WFLang.Var.here) rfl (fun _ _ => trivial)))))
-    `(@WFLang.PCL.PTerm.ofFix _ ⟨$(p.gam), $(p.ret)⟩ $(p.pre) $(p.post) $gs $(p.R) $(p.wf) $(p.body))
-  else
-    -- not recursive: the program is just the body
-    let sig ← fnSig fn
-    withEqnRhs' fn fun ys xs rhs => do
-      let callees ← calleeHeads fn.name rhs [fn.name] gls
-      let c : Ctx := { (Ctx.ofParams fn.name xs sig ys) with
-        callees := callees, fnSig? := none, specFns := ← specFnsIn fn.name rhs,
-        specHead := fun r => fixHead r [fn.name] gls, globals := gls }
-      prog (← stmt c rhs)
+      -- `fn` captured together with a specialised function: one global function, called with
+      -- tag `0`
+      let pos ← reg.size
+      let body ← resolveGRefs pos p.body
+      let info : GInfo := { pos, tag0 := true, pad := n }
+      let fnStx ← `(⟨$(p.gam), $(p.ret), $(p.pre), $(p.post)⟩)
+      let entry : GEntry := { key := fn, info := info, fnStx := fnStx, R := p.R, wf := p.wf,
+                              body := ⟨body⟩ }
+      reg.entries.modify (·.push entry)
+      return ← prog (← callMainStx fn info none reg)
+    let body ← resolveGRefs (← reg.size) p.body
+    return ← `(@WFLang.PCL.PTerm.ofFix _ ⟨$(p.gam), $(p.ret)⟩ $(p.pre) $(p.post) $(← reg.stx)
+      $(p.R) $(p.wf) $(⟨body⟩))
+  -- not recursive: the program is just the body
+  let sig ← fnSig fn
+  withEqnRhs' fn fun ys xs rhs => do
+    let c : Ctx := { (Ctx.ofParams fn.name xs sig ys) with
+      callees := ← calleeKinds fn.name rhs, fnSig? := none, specFns := ← specFnsIn fn.name rhs,
+      gref := registerGlobal reg, gcheckpoint := reg.checkpoint, globals := reg.names }
+    prog (← stmt c rhs)
 
-/-- The global functions visible in the capture of `root` (`collectGlobals`), with their
-signatures, in the order of the global context. -/
-def globalsOf (root : FnRef) : MetaM (Array (Name × FnSig)) := do
+/-- The global functions by attribute visible in the capture of `root` (`collectGlobals`). -/
+def globalsOf (root : FnRef) : MetaM (Array Name) := do
   let extra := root.spec.foldl (fun acc a => acc ++ a.getUsedConstants) #[]
-  (← collectGlobals root.name extra).mapM fun (g : Name) => do
-    let sig ← fnSig { name := g }
-    return (g, sig)
-
-/-- The global context `prev` extended by the definition of the global function `g`, which may
-call the global functions `vis` defined before it: a recursive function is captured as for a
-local `fix` node (its relation, well-foundedness proof and body); a non-recursive one has the
-empty relation `emptyRelation` and its body is captured like a non-recursive program. -/
-def globalDefStx (g : Name) (vis : Array (Name × FnSig)) (prev : Stx) : TermElabM Stx := do
-  let sig ← fnSig { name := g }
-  if ← isWFRec g then
-    let p ← fixParts { name := g } [] vis
-    if p.hoPad.isSome then
-      throwError "#lean_wf_func_to_term: {g} calls itself inside a function argument; it cannot be a global function"
-    return ← `(WFLang.PCL.Globals.defn $prev ⟨$(p.gam), $(p.ret), $(p.pre), $(p.post)⟩ $(p.R)
-      $(p.wf) $(p.body))
-  withEqnRhs' { name := g } fun ys xs rhs => do
-    let gC ← mkConstWithLevelParams g
-    let (pre?, post?) ← prePostOf { name := g } xs (← inferType (mkAppN gC xs)) ys
-    let callees ← calleeHeads g rhs [g] vis
-    let c : Ctx := { (Ctx.ofParams g xs sig ys) with
-      callees := callees, fnSig? := none, hasPost := post?.isSome,
-      specFns := ← specFnsIn g rhs, specHead := fun r => fixHead r [g] vis, globals := vis }
-    let body ← stmt c rhs
-    let pre ← match pre? with
-      | some p => exprToSyntax p
-      | none => `(fun _ => True)
-    let post ← match post? with
-      | some p => exprToSyntax p
-      | none => `(fun _ _ => True)
-    `(WFLang.PCL.Globals.defn $prev
-        ⟨$(← exprToSyntax (mkTyList sig.argTys)), $(← exprToSyntax sig.retTy), $pre, $post⟩
-        emptyRelation emptyWf.wf $body)
-
-/-- The global context of the capture of `root` (syntax), and its functions. -/
-def globalsStx (root : FnRef) : TermElabM (Stx × Array (Name × FnSig)) := do
-  let mut gs ← `(WFLang.PCL.Globals.nil)
-  let mut vis := #[]
-  for (g, sig) in ← globalsOf root do
-    gs ← globalDefStx g vis gs
-    vis := vis.push (g, sig)
-  return (gs, vis)
+  collectGlobals root.name extra
 
 /-- The function to capture, from the argument of `#lean_wf_func_to_term`: a constant `f`, or
 `(f a₁ … aₖ)` where the `aᵢ` are closed values of the function (or type) parameters of `f`:
@@ -605,26 +364,26 @@ syntax (name := wfToTerm) "#lean_wf_func_to_term " term:max : term
 
 @[term_elab wfToTerm] def elabWfToTerm : TermElab := fun stx expectedType? => do
   let fn ← captureTarget stx[1]
-  let (gs, gls) ← globalsStx fn
-  elabTerm (← captureStx fn gs gls) expectedType?
+  elabTerm (← captureStx fn) expectedType?
 
 /-- `wf_agree` proves the agreement theorem of a program produced by
 `#lean_wf_func_to_term f`: `∀ xs, PCL.Term.eval f_term xs = f xs` (or `= (f xs).val` for a
 subtype result, or `∀ xs hs, PCL.PTerm.run f_term ⟨xs⟩ ⟨hs⟩ = f xs hs` with a precondition).
-By uniqueness of the solution of the `fix` equation (`PTerm.ofFix_run`) it suffices that `f`
-satisfies the equation of the body, which follows from `f.eq_def`. -/
+By uniqueness of the solution of the recursive equation of each global function
+(`fixFn_unique`, `PTerm.ofFix_run`) and of each recursive join point (`joinFn_unique`), it
+suffices that the Lean functions satisfy these equations, which follows from their `eq_def`. -/
 syntax (name := wfAgree) "wf_agree" : tactic
 
 /-- The simplification step of the PCL agreement proofs. -/
 def pclSimp : Tactic.TacticM (TSyntax `tactic) :=
   `(tactic| simp [WFLang.PExprs.eval, WFLang.PExpr.eval, WFLang.Var.get, WFLang.BinOp.eval,
         WFLang.UnOp.eval, WFLang.Ty.beq, WFLang.Ty.default, WFLang.PCL.Self.top,
-        WFLang.PCL.Self.push, WFLang.PCL.eval_fix, WFLang.PCL.eval_fnCall_here, WFLang.PCL.Handler.push,
+        WFLang.PCL.Self.push, WFLang.PCL.Handler.push, WFLang.PCL.toEnv_cons, WFLang.PCL.toEnv_one,
         WFLang.uncurryEnv,
         Nat.pred_eq_sub_one, bne, Nat.min_def, Nat.max_def, Nat.dvd_iff_mod_eq_zero,
         WFLang.foldl_range'_eq_rangeLoop, WFLang.rangeLoop_add_sub, WFLang.fold_eq_rangeLoop,
-        WFLang.ite_pure_yield, WFLang.PCL.eval_whileLoop, WFLang.PCL.whileFn_ret,
-        WFLang.whileWF_eq_loopVal, WFLang.whileMeasure_eq_loopVal])
+        WFLang.ite_pure_yield, WFLang.PCL.eval_whileLoop,
+        WFLang.whileWF_eq_loopVal, WFLang.whileMeasure_eq_loopVal, WFLang.Meta.wfFoldCalls])
 
 /-- If `f` calls itself inside a function argument of another recursive function `g`: the
 reference to the copy of `g` specialised to that argument (see `hoRefIn?`). -/
@@ -633,11 +392,10 @@ def hoRefOf? (f : FnRef) : TermElabM (Option FnRef) := do
   let sig ← fnSig f
   withEqnRhs' f fun ys xs rhs => do
     unless ← hoCandidate f.name rhs do return none
-    let gls ← globalsOf f
-    let callees ← calleeHeads f.name rhs [f.name] gls
+    let reg ← GReg.new f
     let c : Ctx := { (Ctx.ofParams f.name xs sig ys) with
-      callees, specFns := ← specFnsIn f.name rhs, specHead := fun r => fixHead r [f.name] gls,
-      globals := gls }
+      callees := ← calleeKinds f.name rhs, specFns := ← specFnsIn f.name rhs,
+      gref := registerGlobal reg, gcheckpoint := reg.checkpoint, globals := reg.names }
     hoRefIn? f c rhs
 
 mutual
@@ -647,6 +405,7 @@ callee in the main goal by the callee's value (`rewriteCalleesWith`, uniqueness 
 partial def rewriteCallees (callees : Array Name) : Tactic.TacticM Unit := do
   rewriteHOCallees callees
   rewriteCalleesWith calleeStep callees
+    (Tactic.evalTactic (← `(tactic| all_goals try $(← pclSimp):tactic)))
 
 /-- The rest of the proof that the callee `g` satisfies the equation of the body of its `fix`
 node, after unfolding `g` once. -/
@@ -670,7 +429,7 @@ partial def rewriteHOCallees (callees : Array Name) : Tactic.TacticM Unit := do
         let tgt ← instantiateMVars (← Tactic.getMainTarget)
         let found ← IO.mkRef (#[] : Array Lean.Expr)
         Meta.forEachExpr tgt fun x => do
-          if x.isAppOfArity `WFLang.PCL.fixFn 13 && !x.hasLooseBVars then found.modify (·.push x)
+          if x.isAppOfArity `WFLang.PCL.fixFn 11 && !x.hasLooseBVars then found.modify (·.push x)
         (← found.get).findM? fun x => isDefEq (x.getArg! 2) tys
       let some fx := fx? | break
       let fnStx ← Tactic.withMainContext do exprToSyntax fx.appFn!.appFn!
@@ -683,7 +442,7 @@ partial def rewriteHOCallees (callees : Array Name) : Tactic.TacticM Unit := do
           instantiateMVars t
         let pf ← mkFreshExprSyntheticOpaqueMVar hTy
         let rest ← Term.withoutErrToSorry <| Tactic.run pf.mvarId! <| Tactic.withoutRecover do
-          Tactic.evalTactic (← `(tactic| refine $(mkIdent `WFLang.PCL.fixFn_unique) _ _ _ _ $F ?_))
+          Tactic.evalTactic (← `(tactic| refine $(mkIdent `WFLang.PCL.fixFn_unique) _ _ _ $F ?_))
           hoEqProof { name := g } gRef
         unless rest.isEmpty do throwError "wf_agree: could not prove the equation of {g}"
         let (_, mvarId) ← (← (← Tactic.getMainGoal).assert `hcallee hTy
@@ -744,10 +503,10 @@ def hoAgree (f gRef : FnRef) (t : Ident) : Tactic.TacticM Unit := do
   Tactic.evalTactic (← `(tactic| (
       intros
       simp only [$t:ident, WFLang.PCL.Term.eval, WFLang.PCL.Term.run, WFLang.PCL.PTerm.run,
-        WFLang.curryEnv, WFLang.PCL.eval_fix, WFLang.PCL.eval_fnCall_here,
-        WFLang.PCL.eval_ret, WFLang.PExpr.eval,
+        WFLang.curryEnv, WFLang.PCL.eval_gCall, WFLang.PCL.Globals.env_defn,
+        WFLang.PCL.FnVar.get_here, WFLang.PCL.eval_ret, WFLang.PExpr.eval,
         WFLang.PExprs.eval, WFLang.Var.get]
-      refine Eq.trans ($(mkIdent `WFLang.PCL.fixFn_unique) _ _ _ _ $F ?hF _ _) ?heq
+      refine Eq.trans ($(mkIdent `WFLang.PCL.fixFn_unique) _ _ _ $F ?hF _ _) ?heq
       case heq => simp)))
   hoEqProof f gRef
 
@@ -756,7 +515,7 @@ def hoAgree (f gRef : FnRef) (t : Ident) : Tactic.TacticM Unit := do
   -- the functions whose values are identified in the proof: the local recursive callees and
   -- the global functions (also those called only from the function arguments of a
   -- specialised `f`)
-  let callees := (← globalsOf f).foldl (fun acc (g, _) => if acc.contains g then acc else acc.push g)
+  let callees := (← globalsOf f).foldl (fun acc g => if acc.contains g then acc else acc.push g)
     (← calleeInfo f.name).2
   if (← mutualGroup? f.name).isSome then
     -- a member of a group of mutually recursive functions: the program is one call of the
@@ -765,7 +524,7 @@ def hoAgree (f gRef : FnRef) (t : Ident) : Tactic.TacticM Unit := do
       intros
       simp [$t:ident, WFLang.PCL.Term.eval, WFLang.PCL.Term.run, WFLang.PCL.PTerm.run,
         WFLang.curryEnv, WFLang.PExpr.eval, WFLang.PExprs.eval, WFLang.Var.get,
-        WFLang.PCL.eval_fix, WFLang.PCL.Handler.push])))
+        WFLang.PCL.Handler.push, WFLang.Meta.wfFoldCalls])))
     rewriteCallees (callees.push f.name)
     return ← Tactic.evalTactic (← `(tactic| wf_close))
   if let some gRef ← hoRefOf? f then
@@ -777,11 +536,12 @@ def hoAgree (f gRef : FnRef) (t : Ident) : Tactic.TacticM Unit := do
       simp [$t:ident, WFLang.PCL.Term.eval, WFLang.PCL.Term.run, WFLang.PCL.PTerm.run,
         WFLang.curryEnv, WFLang.PExpr.eval, WFLang.PExprs.eval, WFLang.Var.get,
         WFLang.BinOp.eval, WFLang.UnOp.eval, WFLang.Ty.beq, WFLang.Ty.default,
-        WFLang.PCL.eval_fix, WFLang.PCL.Handler.push, Nat.pred_eq_sub_one, bne, Nat.min_def,
+        WFLang.PCL.Handler.push, WFLang.PCL.toEnv_cons, WFLang.PCL.toEnv_one,
+        Nat.pred_eq_sub_one, bne, Nat.min_def,
         Nat.max_def, Nat.dvd_iff_mod_eq_zero, WFLang.foldl_range'_eq_rangeLoop,
         WFLang.rangeLoop_add_sub, WFLang.fold_eq_rangeLoop, WFLang.ite_pure_yield,
-        WFLang.PCL.eval_whileLoop, WFLang.PCL.whileFn_ret, WFLang.whileWF_eq_loopVal,
-        WFLang.whileMeasure_eq_loopVal, $f:ident])))
+        WFLang.PCL.eval_whileLoop, WFLang.whileWF_eq_loopVal,
+        WFLang.whileMeasure_eq_loopVal, WFLang.Meta.wfFoldCalls, $f:ident])))
     unfoldInlined f.getId
     rewriteCallees callees
     return ← Tactic.evalTactic (← `(tactic| wf_close))

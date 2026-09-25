@@ -24,6 +24,7 @@ import RequestProject.WFLang.Tests.Normal
 import RequestProject.WFLang.Tests.Globals
 import RequestProject.WFLang.Tests.WhileFunctions
 import RequestProject.WFLang.Tests.While
+import RequestProject.WFLang.Tests.WhereFold
 
 /-!
 # PCL: a typed toy language capturing well-founded Lean functions
