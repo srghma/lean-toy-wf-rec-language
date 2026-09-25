@@ -1,4 +1,5 @@
 import RequestProject.WFLang.Core.Normal
+import RequestProject.WFLang.Core.While
 
 /-!
 # Language `PCL`: well-founded recursion as a construct of the grammar (proof-carrying calls)
@@ -13,6 +14,7 @@ Expr    ::= ret PExpr                        -- tail statements           (this 
           | let v := self args in Expr       -- fixSelfCall
           | let v := f args in Expr          -- fnCall  (f a local function)
           | let v := g args in Expr          -- gCall   (g a global function)
+          | let v := while PExpr do x := Expr from PExpr in Expr    -- whileLoop
           | letrec f := fix self xs. Expr in Expr     -- fix
           | join j (v) := Expr in Expr       -- join
           | jump j PExpr                     -- jump
@@ -63,6 +65,16 @@ In this language well-founded recursion is a constructor of `Expr` itself:
   computation is written once (without join points it would have to be copied into both
   branches, which is exponential in the number of such `if`s).  A call of a recursive
   function (or a loop) in non-tail position is captured as `fix f := … in let v := f args in k`.
+
+**Loops.**  `whileLoop s init c R wf inv hinit body k` is `let v := (while c do x := body from
+x := init) in k`: a well-founded `while` loop on a state `x : s` (a tuple for several loop
+variables).  Like `fix` it carries a relation `R` on its states with `wf : WellFounded`, plus an
+invariant `inv`; the body is a statement whose postcondition is "the new state satisfies `inv`
+and is `R`-below the old one", so every iteration provably goes down.  It is evaluated by
+`WellFounded.fix` on the states (`whileFn`); `whileFn_eq` is the loop equation, `whileFn_unique`
+its uniqueness, and the continuation `k` knows that `v` satisfies the invariant and not the test.
+The body may call the local and global functions in scope, but not the enclosing recursive
+function (a loop is a complete computation, like a call).
 
 The path condition and the decrease proofs only mention `PExpr.eval`, which is defined
 before `Expr`, so no induction–recursion is needed.  All proofs are `Prop`s and are erased by
@@ -242,6 +254,26 @@ inductive Expr (GL : List Fn) : (Γ : List Ty) → (Env Γ → Prop) → List Fn
       (k : Expr GL (f.ret :: Γ) (fun e => G e.2 ∧ f.post (args.eval e.2) e.1) fns
         (sf.map (·.push f.ret)) t (fun e v => Q e.2 v) (.wk js f.ret)) :
       Expr GL Γ G fns sf t Q js
+  /-- `let v := (while c do x := body from x := init) in k`: a **well-founded `while` loop**
+  on a state `x : s`, whose result (the first state on which the test `c` is false) is bound to
+  `v`.  The loop carries a relation `R` on the states (well-founded by `wf`, for each value of the
+  enclosing variables) and an invariant `inv`: the initial state satisfies the invariant
+  (`hinit`), and the body, run on a state `x` satisfying the invariant and the test, must return
+  a state that satisfies the invariant and is `R`-below `x` (its postcondition).  The body is a
+  statement over the state and the enclosing variables; it may call the local and global
+  functions in scope, but not the enclosing recursive function, nor jump to the join points in
+  scope.  `k` knows that `v` satisfies the invariant and not the test. -/
+  | whileLoop {Γ : List Ty} {G : Env Γ → Prop} {fns : List Fn} {sf : Option (Self Γ)} {t : Ty}
+      {Q : Env Γ → t.denote → Prop} {js : JScope Γ t}
+      (s : Ty) (init : PExpr Γ s) (hi : init.isNF = true)
+      (c : PExpr (s :: Γ) .bool) (hc : c.isLoopCond = true)
+      (R : Env Γ → s.denote → s.denote → Prop) (wf : ∀ e, WellFounded (R e))
+      (inv : Env Γ → s.denote → Prop) (hinit : ∀ e, G e → inv e (init.eval e))
+      (body : Expr GL (s :: Γ) (fun e => G e.2 ∧ inv e.2 e.1 ∧ c.eval e = true) fns none s
+        (fun e v => inv e.2 v ∧ R e.2 v e.1) .nil)
+      (k : Expr GL (s :: Γ) (fun e => G e.2 ∧ inv e.2 e.1 ∧ c.eval e = false) fns
+        (sf.map (·.push s)) t (fun e v => Q e.2 v) (.wk js s)) :
+      Expr GL Γ G fns sf t Q js
   /-- `letrec f := (fix self params. body) in rest`, in tail position: a local well-founded
   recursive function with relation `R` (proved well-founded by `wf`), precondition `pre` and
   postcondition `post`, in scope in `rest`.  Its body may call the local functions `fns`
@@ -311,6 +343,17 @@ def Expr.eval {GL : List Fn} (ge : FEnv GL) : {Γ : List Ty} → {G : Env Γ →
       let v := i.get ge (args.eval e) (hpre e g)
       let r := k.eval ge (v.1, e) ⟨g, v.2⟩ fe (Handler.push h) je
       ⟨r.1, r.2⟩
+  | _, _, _, _, _, _, _, .whileLoop _ init _ c _ _ wf inv hinit body k, e, g, fe, h, je =>
+      let W : (x : _) → inv e x → {y // inv e y ∧ c.eval (y, e) = false} :=
+        (wf e).fix (C := fun x => inv e x → {y // inv e y ∧ c.eval (y, e) = false})
+          (fun x ih hx =>
+            if hc : c.eval (x, e) = true then
+              let r := body.eval ge (x, e) ⟨g, hx, hc⟩ fe () ()
+              ih r.1 r.2.2 r.2.1
+            else ⟨x, hx, Bool.eq_false_iff.mpr hc⟩)
+      let v := W (init.eval e) (hinit e g)
+      let r := k.eval ge (v.1, e) ⟨g, v.2⟩ fe (Handler.push h) je
+      ⟨r.1, r.2⟩
   | _, _, _, _, _, _, _, .fix _ _ _ wf pre post body rest, e, g, fe, h, je =>
       let F : (x : _) → pre x → {v // post x v} := wf.fix (C := fun x => pre x → {v // post x v})
         (fun x ih hx => body.eval ge x hx fe (fun y hy hpy => ih y hy hpy) ())
@@ -369,6 +412,101 @@ end
     (e : Env Γ) (g : G e) (fe : FEnv fns) (h : Handler sf e) (je : JEnv js e) :
     ((Expr.fix params r R wf pre post body rest).eval ge e g fe h je).1 =
       (rest.eval ge e g (fixFn ge wf body fe, fe) h je).1 := rfl
+
+/-! ## Soundness of `while` -/
+
+section
+variable {GL : List Fn} (ge : FEnv GL) {Γ : List Ty} {G : Env Γ → Prop} {fns : List Fn} {s : Ty}
+  (c : PExpr (s :: Γ) .bool) {R : Env Γ → s.denote → s.denote → Prop}
+  (wf : ∀ e, WellFounded (R e)) {inv : Env Γ → s.denote → Prop}
+  (body : Expr GL (s :: Γ) (fun e => G e.2 ∧ inv e.2 e.1 ∧ c.eval e = true) fns none s
+    (fun e v => inv e.2 v ∧ R e.2 v e.1) .nil)
+  (fe : FEnv fns) (e : Env Γ) (g : G e)
+
+/-- The function computed by a `while` node (at the environment `e`): from a state satisfying
+the invariant, the first state reached on which the test is false. -/
+def whileFn : (x : s.denote) → inv e x → {y : s.denote // inv e y ∧ c.eval (y, e) = false} :=
+  (wf e).fix (C := fun x => inv e x → {y // inv e y ∧ c.eval (y, e) = false})
+    (fun x ih hx =>
+      if hc : c.eval (x, e) = true then
+        let r := body.eval ge (x, e) ⟨g, hx, hc⟩ fe () ()
+        ih r.1 r.2.2 r.2.1
+      else ⟨x, hx, Bool.eq_false_iff.mpr hc⟩)
+
+/-- **Soundness (1):** a `while` node satisfies the loop equation: if the test holds, run the
+body once and loop again; otherwise stop. -/
+theorem whileFn_eq (x : s.denote) (hx : inv e x) :
+    whileFn ge c wf body fe e g x hx =
+      if hc : c.eval (x, e) = true then
+        whileFn ge c wf body fe e g (body.eval ge (x, e) ⟨g, hx, hc⟩ fe () ()).1
+          (body.eval ge (x, e) ⟨g, hx, hc⟩ fe () ()).2.1
+      else ⟨x, hx, Bool.eq_false_iff.mpr hc⟩ := by
+  unfold whileFn
+  rw [WellFounded.fix_eq]
+
+/-- **Soundness (2):** the loop equation has only one solution. -/
+theorem whileFn_unique (W : (x : s.denote) → inv e x → s.denote)
+    (hW : ∀ x hx, W x hx =
+      if hc : c.eval (x, e) = true then
+        W (body.eval ge (x, e) ⟨g, hx, hc⟩ fe () ()).1 (body.eval ge (x, e) ⟨g, hx, hc⟩ fe () ()).2.1
+      else x) :
+    ∀ x hx, (whileFn ge c wf body fe e g x hx).1 = W x hx := by
+  intro x
+  induction x using (wf e).induction with
+  | _ x IH =>
+    intro hx
+    rw [whileFn_eq, hW]
+    by_cases hc : c.eval (x, e) = true
+    · rw [dif_pos hc, dif_pos hc]
+      exact IH _ (body.eval ge (x, e) ⟨g, hx, hc⟩ fe () ()).2.2 _
+    · rw [dif_neg hc, dif_neg hc]
+
+/-- **Soundness (3):** the result of a loop satisfies the invariant and not the test (this is
+part of the type of `whileFn`). -/
+theorem whileFn_spec (x : s.denote) (hx : inv e x) :
+    inv e (whileFn ge c wf body fe e g x hx).1 ∧
+      c.eval ((whileFn ge c wf body fe e g x hx).1, e) = false :=
+  (whileFn ge c wf body fe e g x hx).2
+
+end
+
+/-- A `while` node whose body is a call-free expression `p` computes the Lean loop
+`whileWF` of its test and its body (`Core/While.lean`). -/
+@[simp] theorem whileFn_ret {GL : List Fn} (ge : FEnv GL) {Γ : List Ty} {G : Env Γ → Prop}
+    {fns : List Fn} {s : Ty} (c : PExpr (s :: Γ) .bool) {R : Env Γ → s.denote → s.denote → Prop}
+    (wf : ∀ e, WellFounded (R e)) {inv : Env Γ → s.denote → Prop}
+    (p : PExpr (s :: Γ) s) (hp : p.isNF = true)
+    (post : ∀ e : Env (s :: Γ), (G e.2 ∧ inv e.2 e.1 ∧ c.eval e = true) →
+      inv e.2 (p.eval e) ∧ R e.2 (p.eval e) e.1)
+    (fe : FEnv fns) (e : Env Γ) (g : G e) (x : s.denote) (hx : inv e x) :
+    (whileFn ge c wf (.ret (fns := fns) (sf := none) (js := .nil) p hp post) fe e g x hx).1 =
+      whileWF (R e) (wf e) (inv e) (fun y => c.eval (y, e)) (fun y => p.eval (y, e))
+        (fun y hy hc => post (y, e) ⟨g, hy, hc⟩) x hx := by
+  symm
+  refine whileWF_unique _ _ _ _ _ _ (fun y hy => (whileFn ge c wf _ fe e g y hy).1) ?_ x hx
+  intro y hy
+  simp only []
+  rw [whileFn_eq]
+  by_cases hc : c.eval (y, e) = true
+  · rw [dif_pos hc, dif_pos hc]; rfl
+  · rw [dif_neg hc, dif_neg hc]
+
+@[simp] theorem eval_whileLoop {GL : List Fn} (ge : FEnv GL) {Γ : List Ty} {G : Env Γ → Prop}
+    {fns : List Fn} {sf : Option (Self Γ)} {t : Ty} {Q : Env Γ → t.denote → Prop}
+    {js : JScope Γ t}
+    (s : Ty) (init : PExpr Γ s) (hi : init.isNF = true)
+    (c : PExpr (s :: Γ) .bool) (hc : c.isLoopCond = true)
+    (R : Env Γ → s.denote → s.denote → Prop) (wf : ∀ e, WellFounded (R e))
+    (inv : Env Γ → s.denote → Prop) (hinit : ∀ e, G e → inv e (init.eval e))
+    (body : Expr GL (s :: Γ) (fun e => G e.2 ∧ inv e.2 e.1 ∧ c.eval e = true) fns none s
+      (fun e v => inv e.2 v ∧ R e.2 v e.1) .nil)
+    (k : Expr GL (s :: Γ) (fun e => G e.2 ∧ inv e.2 e.1 ∧ c.eval e = false) fns
+      (sf.map (·.push s)) t (fun e v => Q e.2 v) (.wk js s))
+    (e : Env Γ) (g : G e) (fe : FEnv fns) (h : Handler sf e) (je : JEnv js e) :
+    ((Expr.whileLoop s init hi c hc R wf inv hinit body k).eval ge e g fe h je).1 =
+      (k.eval ge ((whileFn ge c wf body fe e g (init.eval e) (hinit e g)).1, e)
+        ⟨g, (whileFn ge c wf body fe e g (init.eval e) (hinit e g)).2⟩ fe (Handler.push h) je).1 :=
+  rfl
 
 /-! ## The global context -/
 

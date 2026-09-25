@@ -15,12 +15,15 @@ PExpr  ::= x | lit | op PExpr PExpr | !PExpr | if PExpr then PExpr else PExpr
              -- pure, total, call-free values                          (Core/PExpr.lean)
 NF     ::= PExpr  with  isNF = true              -- optimised normal form (Core/Normal.lean)
 Cond   ::= PExpr  with  isCond = true            -- NF, not a literal, not a negation
+LCond  ::= PExpr  with  isLoopCond = true        -- NF, not a literal (a loop test)
 
 Expr   ::= ret NF                                     -- return
          | if Cond then Expr else Expr                -- case          (tail only)
          | let v := self NF* in Expr                  -- fixSelfCall   (carries `dec`)
          | let v := f NF* in Expr                     -- fnCall        (local function)
          | let v := g NF* in Expr                     -- gCall         (global function)
+         | let v := while LCond do x := Expr from NF in Expr
+                                                      -- whileLoop     (carries R, wf, inv)
          | letrec f := fix self xs. Expr in Expr      -- fix           (tail only)
          | join j (v : s) := Expr in Expr             -- join          (tail only)
          | jump j NF                                  -- jump          (tail)
@@ -61,6 +64,48 @@ type-check (`Tests/Normal.lean`).
 
 Every rewrite preserves `PExpr.eval`, and the agreement theorems (`wf_agree`) are proved about
 the simplified programs, so each capture is checked against the Lean function end to end.
+
+## `while` loops (`PCL/Lang.lean`, `Core/While.lean`)
+
+`whileLoop s init c R wf inv hinit body k` is `let v := (while c do x := body from x := init) in
+k`. The loop state `x : s` is one value (a tuple for several loop variables). The node carries:
+
+* a relation `R e` on the states, for each value `e` of the enclosing variables, with
+  `wf : ∀ e, WellFounded (R e)`;
+* an invariant `inv e x`, with the proof `hinit` that the initial state satisfies it;
+* a body, which is a statement over `x` and the enclosing variables. Its path condition includes
+  the invariant and the test (`c = true`). Its postcondition is that the new state satisfies the
+  invariant and is `R`-below the old one. The `ret`s of the body prove it, like the `dec` proof
+  of a recursive call.
+
+The continuation `k` knows that `v` satisfies the invariant and that the test is false. So a
+loop gives Hoare-style partial correctness for free: `Tests/While.lean` shows this with a
+hand-written program whose postcondition follows from the loop's exit condition. The evaluator
+runs the loop with `WellFounded.fix` on the states. `whileFn_eq` is the loop equation and
+`whileFn_unique` says it has only one solution. `while_exits` and
+`while_nonterminating_unbuildable` (`PCL/Termination.lean`) say that every loop exits and that a
+loop whose test stays true cannot be written.
+
+A loop binds its result, like a call, so it can occur in non-tail position. It does not need to
+be a `fix` in tail position. The test is a `PExpr` with `isLoopCond`: in normal form and not a
+literal. Unlike the test of an `if`, it may be a negation, since the body and the exit of a loop
+cannot be swapped. The body may call the local and global functions in scope. It may not call
+the enclosing recursive function, and it may not jump to a join point: a loop is a complete
+computation, like a call.
+
+**Lean side.** Lean's `while` (in `do` notation) is built on `Loop.forIn`, a `partial def`. It
+has no termination proof and cannot be unfolded in proofs, so the capture cannot reuse it. The
+well-founded replacement is `WFLang.whileWF R wf inv c body step init hinit` (`Core/While.lean`).
+There is also its measure form `whileMeasure μ c body dec init`, with the notation
+
+```lean
+wf_while (x, y) := init while c do body termination_by μ   -- (decreasing_by tac)?
+```
+
+`#lean_wf_func_to_term` turns each such loop into one `whileLoop` node. It reuses the Lean
+relation, invariant and proofs (as functions of the environment), requires the test and the body
+to be call-free (the initial state may call), and proves agreement by rewriting both sides to
+`loopVal c body init`, the first iterate of `body` on which `c` is false (`whileWF_eq_loopVal`).
 
 ## Global context (`PCL/Lang.lean`, `Capture/Elab.lean`)
 

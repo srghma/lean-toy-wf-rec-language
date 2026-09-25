@@ -112,9 +112,10 @@ def Ctx.ofParams (fn : Name) (xs : Array Lean.Expr) (sig? : Option FnSig := none
 def objArgs (sig : FnSig) (args : Array Lean.Expr) : List Lean.Expr :=
   sig.objPos.map (args[·]!)
 
-/-- Does `e` call the function being captured, or one of the recursive callees? -/
+/-- Does `e` call the function being captured, or one of the recursive callees, or contain a
+well-founded `while` loop (which becomes a statement, like a call)? -/
 def hasCall (c : Ctx) (e : Lean.Expr) : Bool :=
-  (e.find? fun x => x.isAppOf c.fn || c.callees.any (x.isAppOf ·.1) ||
+  (e.find? fun x => x.isAppOf c.fn || x.isAppOf ``WFLang.whileWF || c.callees.any (x.isAppOf ·.1) ||
     c.specFns.any (x.isAppOf ·) || c.group.any (x.isAppOf ·) || c.globals.any (x.isAppOf ·.1) ||
     c.ho.any (fun h => x.isAppOf h.fName || x.isAppOf h.gRef.name)).isSome
 
@@ -542,5 +543,19 @@ def hpreStx (c : Ctx) (sig : FnSig) : MetaM Stx := do
 /-- The proof of the postcondition at a `ret` (trivial if there is none). -/
 def postStx (c : Ctx) : MetaM Stx := do
   if c.hasPost then decStx c else `(fun _ _ => trivial)
+
+/-- A Lean term `t` over the variables of the program, as a function of the environment:
+`fun (e : Env Γ) => t[x_i := e.i]`, as syntax.  Used for the relation, the invariant and the
+proofs of a `while` loop, which are Lean terms (not call-free expressions of the language). -/
+def envFunStx (c : Ctx) (t : Lean.Expr) : TermElabM Stx := do
+  let tys ← c.vars.mapM fun v => do tyOf (← v.getType)
+  let gam := WFLang.Meta.mkTyList tys
+  let f ← withLocalDeclD `e (mkApp (mkConst ``WFLang.Env) gam) fun env => do
+    let projs ← (List.range c.vars.length).mapM (WFLang.Meta.envProj env ·)
+    let t' := (← instantiateMVars t).replaceFVars (c.vars.map mkFVar).toArray projs.toArray
+    mkLambdaFVars #[env] t'
+  if f.hasFVar then
+    throwError "#lean_wf_func_to_term: the termination argument of a `while` loop uses a local hypothesis (not supported){indentExpr t}"
+  Term.exprToSyntax f
 
 end WFLang.Translate

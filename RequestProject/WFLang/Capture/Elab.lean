@@ -137,6 +137,8 @@ partial def lift (c : Ctx) (e : Lean.Expr) (k : Ctx → Lean.Expr → TermElabM 
   if e.isLet && hasCall c e.letValue! then
     return ← lift c e.letValue! fun c v => lift c (e.letBody!.instantiate1 v) k
   if let some e' ← unfoldStep? e then return ← lift c e' k
+  -- a well-founded `while` loop: `let v := while … in k`
+  if e.isAppOfArity ``WFLang.whileWF 9 then return ← whileStx c e k
   -- a call of `f` or of the specialised `g`, in the local recursive function capturing both
   if let some h := c.ho then
     if let some args ← hoSelfArgs? c h e then
@@ -223,6 +225,55 @@ partial def lift (c : Ctx) (e : Lean.Expr) (k : Ctx → Lean.Expr → TermElabM 
     return ← lift c s fun c v =>
       lift c (e.replace fun x => if x == s then some v else none) k
   throwError "#lean_wf_func_to_term: recursive call in an unsupported position{indentExpr e}"
+
+/-- `WFLang.whileWF R wf inv cond body step init hinit` (a well-founded `while` loop) in
+non-tail position, followed by the rest of the computation `k`:
+`Expr.whileLoop s init c R wf inv hinit (ret body) (k v)`.  The initial state is evaluated first
+(it may contain calls); the test and the body must be call-free.  The relation, the invariant and
+the proofs are the Lean ones, as functions of the environment (`envFunStx`): the proof that the
+body keeps the invariant and goes down is the Lean proof `step`, and the initial state satisfies
+the invariant by the Lean proof `hinit`. -/
+partial def whileStx (c : Ctx) (e : Lean.Expr) (k : Ctx → Lean.Expr → TermElabM Stx) :
+    TermElabM Stx := do
+  let args := e.getAppArgs
+  let (β, R, wf, inv, cf, bf, step, init, hb) :=
+    (args[0]!, args[1]!, args[2]!, args[3]!, args[4]!, args[5]!, args[6]!, args[7]!, args[8]!)
+  lift c init fun c init' => do
+    let sTy ← tyStx β
+    let (cStx, bStx) ← withLocalDeclD `x β fun x => do
+      let c' := { c with vars := x.fvarId! :: c.vars }
+      let cx := (mkApp cf x).headBeta
+      let bx := (mkApp bf x).headBeta
+      if hasCall c' cx || hasCall c' bx then
+        throwError "#lean_wf_func_to_term: a call (or a loop) inside the test or the body of a `while` loop is not supported{indentExpr e}"
+      return (← pexpr c' cx, ← pexpr c' bx)
+    let initStx ← pexpr c init'
+    let RStx ← envFunStx c R
+    let wfStx ← envFunStx c wf
+    let invStx ← envFunStx c inv
+    let stepStx ← envFunStx c step
+    -- `hinit` of the Lean loop, for the initial state (after its calls have been evaluated)
+    let hbStx ← envFunStx c (hb.replace fun x => if x == init then some init' else none)
+    let hinit ← `(fun e _ => by
+      have h := $hbStx e
+      first
+        | exact h
+        | (simp only [WFLang.PExprs.eval, WFLang.PExpr.eval, WFLang.Var.get, WFLang.BinOp.eval,
+          WFLang.UnOp.eval, WFLang.Ty.beq, WFLang.Ty.default] at h ⊢; first | exact h | simpa using h)
+        | simp_all [WFLang.PExprs.eval, WFLang.PExpr.eval, WFLang.Var.get, WFLang.BinOp.eval,
+          WFLang.UnOp.eval, WFLang.Ty.beq, WFLang.Ty.default])
+    let post ← `(fun e g => by
+      obtain ⟨x, e⟩ := e
+      have hc : _ = true := g.2.2
+      have h := $stepStx e x g.2.1 (by first | exact hc | simpa [WFLang.PExprs.eval, WFLang.PExpr.eval, WFLang.Var.get, WFLang.BinOp.eval,
+          WFLang.UnOp.eval, WFLang.Ty.beq, WFLang.Ty.default] using hc)
+      first
+        | exact h
+        | simpa [WFLang.PExprs.eval, WFLang.PExpr.eval, WFLang.Var.get, WFLang.BinOp.eval,
+          WFLang.UnOp.eval, WFLang.Ty.beq, WFLang.Ty.default] using h)
+    let rest ← withLocalDeclD `v β fun v => k { c with vars := v.fvarId! :: c.vars } v
+    `(WFLang.PCL.Expr.whileLoop $sTy $initStx (by decide) $cStx (by decide) $RStx $wfStx $invStx
+        $hinit (WFLang.PCL.Expr.ret $bStx (by decide) $post) $rest)
 
 partial def liftMany (c : Ctx) (es : List Lean.Expr) (acc : List Lean.Expr)
     (k : Ctx → List Lean.Expr → TermElabM Stx) : TermElabM Stx :=
@@ -572,7 +623,8 @@ def pclSimp : Tactic.TacticM (TSyntax `tactic) :=
         WFLang.uncurryEnv,
         Nat.pred_eq_sub_one, bne, Nat.min_def, Nat.max_def, Nat.dvd_iff_mod_eq_zero,
         WFLang.foldl_range'_eq_rangeLoop, WFLang.rangeLoop_add_sub, WFLang.fold_eq_rangeLoop,
-        WFLang.ite_pure_yield])
+        WFLang.ite_pure_yield, WFLang.PCL.eval_whileLoop, WFLang.PCL.whileFn_ret,
+        WFLang.whileWF_eq_loopVal, WFLang.whileMeasure_eq_loopVal])
 
 /-- If `f` calls itself inside a function argument of another recursive function `g`: the
 reference to the copy of `g` specialised to that argument (see `hoRefIn?`). -/
@@ -727,7 +779,9 @@ def hoAgree (f gRef : FnRef) (t : Ident) : Tactic.TacticM Unit := do
         WFLang.BinOp.eval, WFLang.UnOp.eval, WFLang.Ty.beq, WFLang.Ty.default,
         WFLang.PCL.eval_fix, WFLang.PCL.Handler.push, Nat.pred_eq_sub_one, bne, Nat.min_def,
         Nat.max_def, Nat.dvd_iff_mod_eq_zero, WFLang.foldl_range'_eq_rangeLoop,
-        WFLang.rangeLoop_add_sub, WFLang.fold_eq_rangeLoop, WFLang.ite_pure_yield, $f:ident])))
+        WFLang.rangeLoop_add_sub, WFLang.fold_eq_rangeLoop, WFLang.ite_pure_yield,
+        WFLang.PCL.eval_whileLoop, WFLang.PCL.whileFn_ret, WFLang.whileWF_eq_loopVal,
+        WFLang.whileMeasure_eq_loopVal, $f:ident])))
     unfoldInlined f.getId
     rewriteCallees callees
     return ← Tactic.evalTactic (← `(tactic| wf_close))

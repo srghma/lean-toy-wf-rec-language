@@ -107,8 +107,16 @@ The agreement proof shows that the node computes
   function (a second, different loop whose body calls `f` is rejected); `f` and `g` must have
   the same result type; no proof parameters or subtype result; the calls of `f` inside the
   function argument may not be under a further binder.
-* **Not well-founded definitions**: `while` loops (`Tco.ackWhile`, `Tco.diagonalWhile`,
-  `Tco.mc91While`, `isqrt`, …), `partial def`, `partial_fixpoint`. Lean builds them without any
-  termination proof (`Lean.Loop.forIn` / opaque implementations), so there is no relation or
-  decreasing proof to reuse. They can only be captured after being rewritten as well-founded
-  recursion or as a bounded `for` loop.
+* **Not well-founded definitions**: Lean's own `while` loops in `do` notation (`Tco.ackWhile`,
+  `Tco.diagonalWhile`, `Tco.mc91While`, `isqrt`, …), `partial def`, `partial_fixpoint`. Lean
+  builds them without any termination proof (`Lean.Loop.forIn` / opaque implementations), so
+  there is no relation or decreasing proof to reuse. They can be captured after being rewritten
+  with the **well-founded `while`** (`wf_while … termination_by μ`, or `WFLang.whileWF` with an
+  invariant, `Core/While.lean`). The capture turns such a loop into a `PCL` `while` statement,
+  see `Tests/WhileFunctions.lean` and `Tests/While.lean`: `diagonalWhile`, `mc91While` and
+  Newton's `isqrt` are transcribed there with their measures. They can also be rewritten as
+  well-founded recursion or as a bounded `for` loop. `ackWhile` / `ackNoDataStructure` would
+  need a measure on the stack (a multiset order) and are not transcribed.
+* **Calls inside a well-founded `while` loop**: the test and the body of a captured loop must be
+  call-free (`WhileEx.callInBody` is rejected). The language allows calls in the body, but the
+  capture would have to prove the decrease from the callees' postconditions only.

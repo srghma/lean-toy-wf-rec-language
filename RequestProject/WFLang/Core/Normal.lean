@@ -98,6 +98,12 @@ be dead) nor a negation (the branches would be swapped). -/
 def PExpr.isCond (c : PExpr Γ .bool) : Bool :=
   c.isNF && !c.isLit && !c.isNot
 
+/-- A **loop test**: the test of a `while` loop, in normal form and not a literal (a loop on
+`false` is dead code, and a loop on `true` cannot terminate).  Unlike the test of an `if`, it
+may be a negation: the body and the exit of a loop cannot be swapped. -/
+def PExpr.isLoopCond (c : PExpr Γ .bool) : Bool :=
+  c.isNF && !c.isLit
+
 /-- Normal form of every expression of an argument tuple. -/
 def PExprs.isNF : {ts : List Ty} → PExprs Γ ts → Bool
   | _, .nil => true

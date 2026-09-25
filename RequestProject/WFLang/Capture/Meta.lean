@@ -2,6 +2,7 @@ import Lean
 import Mathlib.Tactic.CasesM
 import RequestProject.WFLang.Core.PExpr
 import RequestProject.WFLang.Core.Loops
+import RequestProject.WFLang.Core.While
 
 /-!
 # Reading a well-founded Lean function (metaprogramming for the capture)
@@ -499,7 +500,9 @@ def rangeLoopOfFold? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
       #[← mkLambdaFVars #[zs[0]!, zs[2]!] b, e.getArg! 1, mkNatLit 0, e.getArg! 3])
 
 /-- Remove the `Id` monad (`Id.run`, `bind`, `pure`) and rewrite bounded loops (`for` over a
-range, `Nat.fold`) into `WFLang.rangeLoop`, whose function argument is then specialised. -/
+range, `Nat.fold`) into `WFLang.rangeLoop`, whose function argument is then specialised, and
+`while` loops with a measure (`WFLang.whileMeasure`, the notation `wf_while`) into the general
+well-founded loop `WFLang.whileWF`, which becomes a `PCL` `while` statement. -/
 def normLoops (e : Lean.Expr) : MetaM Lean.Expr :=
   Meta.transform e (post := fun e => do
     let isId (m : Lean.Expr) := m.isConstOf ``Id
@@ -511,6 +514,9 @@ def normLoops (e : Lean.Expr) : MetaM Lean.Expr :=
       if let some r ← rangeLoopOfForIn? e then return .visit r
     if e.isAppOfArity ``Nat.fold 4 then
       if let some r ← rangeLoopOfFold? e then return .visit r
+    -- a `while` loop with a measure: the general well-founded loop `whileWF`
+    if e.isAppOfArity ``WFLang.whileMeasure 6 then
+      if let some r ← unfoldDefinition? e then return .visit r.headBeta
     return .continue)
 
 /-- Is `c` a recursive function (other than `fn`) with specialised parameters (function, type

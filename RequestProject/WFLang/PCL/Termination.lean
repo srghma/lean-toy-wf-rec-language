@@ -20,6 +20,8 @@ makes when run on `x`, or `none` if the body returns without calling itself (a b
 * `fix_body_has_base_case`: in particular every `fix` body has a base case.
 * `loop_unbuildable`: the non-terminating program `f x = f x` cannot be written, because the
   decrease proof its `fixSelfCall` node needs does not exist for a well-founded `R`.
+* `while_exits`: every `while` loop reaches a state on which its test is false;
+  `while_nonterminating_unbuildable`: a loop whose test stays true cannot be written.
 -/
 
 namespace WFLang.PCL
@@ -49,8 +51,8 @@ def JVar.getFirst {params : List Ty} {R : Env params → Env params → Prop}
 /-- The arguments of the first recursive call made on input `e` (together with the fact that
 they are `R`-below the current parameters and satisfy the precondition), or `none` if a `ret`
 is reached first.  A `jump` continues with the body of the join point (`jf`).  Calls of local
-and global functions are complete calls: they are run, and the first recursive call is looked
-for in the rest. -/
+and global functions are complete calls, and so are `while` loops (whose bodies cannot call the
+enclosing function): they are run, and the first recursive call is looked for in the rest. -/
 def Expr.firstCall {GL : List Fn} (ge : FEnv GL) : {Γ : List Ty} → {G : Env Γ → Prop} →
     {fns : List Fn} → {sf : Self Γ} →
     {t : Ty} → {Q : Env Γ → t.denote → Prop} → {js : JScope Γ t} →
@@ -69,6 +71,9 @@ def Expr.firstCall {GL : List Fn} (ge : FEnv GL) : {Γ : List Ty} → {G : Env �
   | _, _, _, _, _, _, _, .gCall i args _ hpre k, e, g, fe, jf =>
       k.firstCall ge ((i.get ge (args.eval e) (hpre e g)).1, e)
         ⟨g, (i.get ge (args.eval e) (hpre e g)).2⟩ fe jf
+  | _, _, _, _, _, _, _, .whileLoop _ init _ c _ _ wf _ hinit body k, e, g, fe, jf =>
+      k.firstCall ge ((whileFn ge c wf body fe e g (init.eval e) (hinit e g)).1, e)
+        ⟨g, (whileFn ge c wf body fe e g (init.eval e) (hinit e g)).2⟩ fe jf
   | _, _, _, _, _, _, _, .fix _ _ _ wf _ _ body rest, e, g, fe, jf =>
       rest.firstCall ge e g (fixFn ge wf body fe, fe) jf
   | _, _, _, _, _, _, _, .join _ _ body m, e, g, fe, jf =>
@@ -124,6 +129,35 @@ theorem loop_unbuildable {params : List Ty} (R : Env params → Env params → P
       (fun _ _ => trivial) (.ret (.var .here) rfl (fun _ _ => trivial))) () x trivial
   rw [Expr.firstCall] at hz
   cases hz
+
+/-- **Every `while` loop exits.**  Started from a state satisfying its invariant, the loop of
+a `while` node reaches, after finitely many runs of its body (each going down along its
+well-founded relation), a state satisfying the invariant on which its test is false. -/
+theorem while_exits {GL : List Fn} (ge : FEnv GL) {Γ : List Ty} {G : Env Γ → Prop}
+    {fns : List Fn} {s : Ty} (c : PExpr (s :: Γ) .bool) {R : Env Γ → s.denote → s.denote → Prop}
+    (wf : ∀ e, WellFounded (R e)) {inv : Env Γ → s.denote → Prop}
+    (body : Expr GL (s :: Γ) (fun e => G e.2 ∧ inv e.2 e.1 ∧ c.eval e = true) fns none s
+      (fun e v => inv e.2 v ∧ R e.2 v e.1) .nil)
+    (fe : FEnv fns) (e : Env Γ) (g : G e) (x : s.denote) (hx : inv e x) :
+    ∃ y, inv e y ∧ c.eval (y, e) = false :=
+  ⟨_, whileFn_spec ge c wf body fe e g x hx⟩
+
+/-- **A loop that never exits cannot be written**: if the test of a `while` node is true on
+every state satisfying the invariant, no initial state satisfies the invariant (so the proof
+`hinit` the node needs does not exist).  E.g. `while x == x do x := x` would need a relation `R`
+with `R x x`, which is not well-founded. -/
+theorem while_nonterminating_unbuildable {GL : List Fn} (ge : FEnv GL) {Γ : List Ty}
+    {G : Env Γ → Prop} {fns : List Fn} {s : Ty} (c : PExpr (s :: Γ) .bool)
+    {R : Env Γ → s.denote → s.denote → Prop} (wf : ∀ e, WellFounded (R e))
+    {inv : Env Γ → s.denote → Prop}
+    (body : Expr GL (s :: Γ) (fun e => G e.2 ∧ inv e.2 e.1 ∧ c.eval e = true) fns none s
+      (fun e v => inv e.2 v ∧ R e.2 v e.1) .nil)
+    (fe : FEnv fns) (e : Env Γ) (g : G e)
+    (always : ∀ y, inv e y → c.eval (y, e) = true) (x : s.denote) : ¬ inv e x := by
+  intro hx
+  obtain ⟨y, hy, hc⟩ := while_exits ge c wf body fe e g x hx
+  rw [always y hy] at hc
+  cases hc
 
 end WFLang.PCL
 

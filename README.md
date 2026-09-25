@@ -35,6 +35,7 @@ theorem gcd_agree : ∀ m n, Term.eval gcd_term m n = gcd m n := by wf_agree
   | fixSelfCall args ha dec hpre k         -- let v := self args in k   (recursive call)
   | fnCall f args ha hpre k                -- let v := f args in k      (local function f)
   | gCall g args ha hpre k                 -- let v := g args in k      (global function g)
+  | whileLoop s init c R wf inv hinit body k  -- let v := while c do x := body from init in k
   | fix params r R wf pre post body rest   -- letrec f := fix … in rest, tail position only
   | join s P body m                        -- join j (v : s) := body in m, tail position only
   | jump j p hp hpre hpost                 -- jump j p                  (tail position)
@@ -62,7 +63,15 @@ theorem gcd_agree : ∀ m n, Term.eval gcd_term m n = gcd m n := by wf_agree
   `R`-smaller. That proof may use the enclosing `if` tests, the precondition and the
   postconditions of earlier calls, which are recorded in the type of the statement (the path
   condition).
-* `Expr.eval` is total: structural recursion on the syntax, and `WellFounded.fix` at `fix` nodes.
+* **`while` loops** (`whileLoop`): a well-founded loop on a state `x : s` (a tuple for several
+  loop variables). It carries a relation on the states, its well-foundedness proof and an
+  invariant. The body is a statement whose postcondition says that the new state satisfies the
+  invariant and is below the old one, so every iteration goes down. The rest of the program knows
+  that the result satisfies the invariant and not the test (partial correctness for free, e.g.
+  `WhileHand.divOut_spec` in `Tests/While.lean`). Soundness: `whileFn_eq` (loop equation),
+  `whileFn_unique`, `while_exits`, `while_nonterminating_unbuildable`.
+* `Expr.eval` is total: structural recursion on the syntax, and `WellFounded.fix` at `fix` and
+  `while` nodes.
   It returns a plain value, with no fuel, no `Option` and no runtime checks.
 * Soundness: `fixFn_eq`, meaning a `fix` node satisfies its recursive equation, and `fixFn_unique`,
   meaning it is the only solution. `PTerm.run_post`: every result satisfies the postcondition.
@@ -94,12 +103,27 @@ The capture supports:
     themselves in a function argument are always captured at the call site;
 * subtype results (postconditions) and proof parameters (preconditions);
 * mutual recursion (one `fix` with a tag parameter);
+* **well-founded `while` loops** written with `wf_while x := init while c do body termination_by μ`
+  (optionally `decreasing_by tac`) or `WFLang.whileWF` (relation + invariant), from
+  `Core/While.lean`. Each loop becomes one `whileLoop` node; the test and the body must be
+  call-free. Lean's own `while` in `do` notation is `partial` (no termination proof, cannot be
+  unfolded in proofs), so it stays rejected; `Tests/WhileFunctions.lean` transcribes the uploaded
+  `diagonalWhile`, `mc91While` and Newton `isqrt` loops with their measures:
+
+  ```lean
+  def isqrtNewton (n : Nat) : Nat :=
+    (wf_while (x, y) := (n, (n + 1) / 2) while y < x do (y, (y + n / y) / 2)
+      termination_by x).1
+  def isqrtNewton_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term isqrtNewton
+  theorem isqrtNewton_agree : ∀ n, Term.eval isqrtNewton_term n = isqrtNewton n := by wf_agree
+  ```
 * bounded `for` loops and `Nat.fold`, and function parameters specialised to the function
   passed at each call site, including recursion through a function argument
   (`Tco.hyperWhile`, `Tco.hyperTCO`, `Tco.ack2`).
 
 `GAPS.md` lists what is still rejected (e.g. calls under a `fun` in library code such as
-`List.map`, and `while` loops, which Lean builds without a termination proof).
+`List.map`, Lean's own `while` loops in `do` notation, which Lean builds without a termination
+proof, and calls inside the body of a well-founded `while`).
 
 ## Use of Mathlib
 
@@ -134,9 +158,12 @@ RequestProject/WFLang.lean          imports everything
 RequestProject/WFLang/
 ├── Core/Types.lean                 Ty, Env, Var, Sig, FnType, curryEnv, BinOp, fixedRel, hoRel
 ├── Core/Loops.lean                 rangeLoop: first-order form of `for` loops and `Nat.fold`
+├── Core/While.lean                 well-founded `while` in Lean: whileWF, whileMeasure, `wf_while`,
+│                                   loop equation, loopVal
 ├── Core/PExpr.lean                 call-free expressions PExpr / PExprs
 ├── Core/Normal.lean                optimised normal form: PExpr.isNF, PExpr.isCond
-├── PCL/Lang.lean                   Expr (ret, ite, fixSelfCall, fnCall, gCall, fix, join, jump),
+├── PCL/Lang.lean                   Expr (ret, ite, fixSelfCall, fnCall, gCall, whileLoop, fix,
+│                                   join, jump),
 │                                   eval, Globals, PTerm/Term, soundness
 ├── PCL/Size.lean                   size measures (nodes, joins, fixes, global calls, globals)
 ├── PCL/Termination.lean            base-case existence, unbuildable loop
@@ -163,7 +190,11 @@ RequestProject/WFLang/
     │                               and without join points
     ├── Normal.lean                 optimised normal form: captures of simplifiable functions,
     │                               the isNF checks, unsimplified programs rejected
-    └── Globals.lean                global functions vs @[inlinable]; shapes and sizes
+    ├── Globals.lean                global functions vs @[inlinable]; shapes and sizes
+    ├── WhileFunctions.lean         Lean functions written with well-founded `while` loops
+    └── While.lean                  a hand-written `while` program with its specification;
+                                    captures of the loops + agreement theorems, shapes,
+                                    runtime checks, rejections
 GAPS.md                             what is supported, how, and what is left
 GRAMMAR.md                          grammar layers: why join points, why no Atom layer
 Bench.lean                          `lake exe wfbench <native|pcl> <m>`

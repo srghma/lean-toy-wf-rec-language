@@ -1,3 +1,40 @@
+# Summary of changes for run 69845e56-0d4c-4643-8303-6b7b9aa8907d
+`PCL` now has a well-founded `while` loop, and `#lean_wf_func_to_term` captures Lean functions that use one. Lean's own `while` in `do` notation still can't be captured, so loops have to be written with the new `wf_while` notation (or `WFLang.whileWF`). The full `lake build` passes, including all the existing tests and `wfbench`, and there is no `sorry`. `#print axioms` on the new theorems I sampled shows only `propext`, `Classical.choice` and `Quot.sound`.
+
+**The loop in the language (`PCL/Lang.lean`)**
+- New statement `Expr.whileLoop`: `let v := while c do x := body from init in k`. The loop state `x` is one value, a tuple if there are several loop variables.
+- Like `fix`, it carries a relation on the states with its well-foundedness proof, plus an invariant. The body's postcondition is "the new state satisfies the invariant and is below the old one", so each iteration provably goes down.
+- The rest of the program (`k`) knows that the result satisfies the invariant and that the test is false.
+- The evaluator runs the loop with `WellFounded.fix`, so it stays total: no fuel, no `Option`.
+- The loop test only has to be in normal form and not a literal; unlike an `if` test it may be a negation (new check `isLoopCond`). The body can't call the enclosing recursive function or jump to a join point.
+- Proved: the loop equation (`whileFn_eq`), that it has only one solution (`whileFn_unique`), and that the result satisfies the invariant and exit condition (`whileFn_spec`).
+- In `PCL/Termination.lean`: every loop exits (`while_exits`), and a loop whose test stays true can't be written (`while_nonterminating_unbuildable`).
+- `PCL/Size.lean` has a new count `whiles`.
+
+**Writing loops in Lean (`Core/While.lean`)**
+- Lean's `while` is built on a `partial` function, with no termination proof, and proofs can't look inside it. So I added a well-founded replacement:
+  - `whileWF R wf inv c body step init hinit`: a relation, an invariant and a proof that each iteration keeps the invariant and goes down.
+  - `whileMeasure`, for a `Nat` measure, with the notation `wf_while (x, y) := init while c do body termination_by μ`. `decreasing_by tac` is optional; otherwise the decrease is tried with `omega`.
+- Proved there: the loop equation, uniqueness, partial correctness, a Hoare-style induction rule, and `whileWF_eq_loopVal`, which says a loop's value doesn't depend on its termination argument.
+
+**Capture (`Capture/`)**
+- Each `wf_while` / `whileWF` loop becomes one `whileLoop` node, reusing the Lean relation, invariant and proofs.
+- `wf_agree` proves agreement by rewriting both sides to the same loop value.
+- **Limitation:** the loop's test and body must be call-free (the initial state may contain calls). A loop with a call in its body is rejected with a clear error.
+
+**Tests (`Tests/WhileFunctions.lean`, `Tests/While.lean`)**
+- 12 functions are captured, each with an agreement theorem proved by `wf_agree`:
+  - `isqrt`, `isqrtNewton`, `gcdLoop`, `sumDown`, `mc91While`, `diagonalWhile`, `collatzSteps`;
+  - `roundSum` (a loop after a recursive call), `evenDown` (with an invariant), `twoLoops`;
+  - `isqrtSum` (a loop inside a global function) and `evenSqrt` (the loop's initial state calls a global function).
+- A hand-written program, `divOut`, has its specification in its type (for `d > 1` and `n > 0` the result is positive and not divisible by `d`). `divOut_spec` gets it from the loop's invariant and exit condition.
+- The number of `while` and `fix` nodes per program is pinned, and runtime results are checked.
+- Your uploaded `diagonalWhile`, `mc91While` and Newton `isqrt` are rewritten with explicit measures. They match the originals on sample inputs only; that's not a proof, because the originals use Lean's `while`.
+- Two rejections are pinned: a call inside a loop body, and Lean's own `while` (`Tco.mc91While`).
+- I did not rewrite `ackWhile` or `ackNoDataStructure`: they would need a termination measure on the stack.
+
+`README.md`, `GRAMMAR.md` (a new section on `while`) and `GAPS.md` are updated.
+
 # Summary of changes for run 7b1b1f57-889e-4feb-9509-6ecefccf7783
 Mathlib was already installed: `lakefile.toml` requires it at tag `v4.28.0`, the same version as the Lean toolchain, and its compiled files were present. Before this run it was only used in two places (`Relation.ReflTransGen` and the `casesm` tactic). I refactored the parts where Mathlib replaces hand-written code. The full `lake build` passes, including every test, and so does `lake build wfbench`. There is no `sorry` in the project, and no statement of any user-facing theorem changed.
 
