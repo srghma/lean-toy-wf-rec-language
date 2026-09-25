@@ -1,155 +1,19 @@
 import RequestProject.WFLang.Tests.MoreChecks
+import RequestProject.WFLang.Tests.GapFunctions
 
 /-!
-# Coverage gaps: well-founded functions the capture does not (yet) handle
+# The coverage study (`GAPS.md`): captures, agreement theorems, runtime checks
 
-Each function below is a well-founded (or structurally recursive, or plain) Lean function.
-The `#guard_msgs` blocks record what `#lean_wf_func_to_term` currently does with it, so the
-build fails as soon as that changes.  `GAPS.md` at the project root classifies these gaps
-by how much work each would take to support.
-
-* **Accepted**: captured, agreement theorem proved by `wf_agree`, and checked at runtime.
-  `fixedMid`/`fixedMid3` (a fixed parameter that is not the first one), `whereHelper` (a
-  non-recursive function with a recursive `where` helper) and `haveProof` (a `have` using the
-  hypothesis of `if h : …`) were rejected or failed before, and were fixed together with this
-  file.
-* **Rejected**: `#expect_reject` (from `MoreChecks.lean`) succeeds only if the capture fails,
-  and prints the first line of the error.
+Each function of `GapFunctions.lean` exercises one feature that the capture did not handle at
+first: control flow (`if`/`match` with calls in non-tail position, `match` on `Bool`, literal
+patterns, `match h : …`), operators, `Int`/pairs/lists, subtype results (postconditions),
+bounded loops and `Nat.fold`, specialised higher-order functions, and recursion through a
+function argument.  Each is captured by `#lean_wf_func_to_term`, its agreement theorem is proved
+by `wf_agree`, and it is checked at runtime (`#guard_msgs`).  `underLambda` is still rejected;
+its error message is pinned by `#expect_reject` (from `MoreChecks.lean`).  `GAPS.md` at the
+project root describes each construct and what is left.
 -/
 
-namespace Gaps
-
-/-! ## Accepted -/
-
-/-- `if h : …` whose hypothesis is only used by the termination proof. -/
-def diteHyp (n : Nat) : Nat := if _h : n = 0 then 0 else diteHyp (n - 1) + 1
-termination_by n
-
-/-- A fixed parameter `k` that is *not* the first parameter (Lean moves it in front of the
-`WellFounded.fix`). -/
-def fixedMid (n k : Nat) : Nat := if n = 0 then k else fixedMid (n - 1) k + 1
-termination_by n
-
-/-- Fixed parameter between two changing ones. -/
-def fixedMid3 (n k acc : Nat) : Nat := if n = 0 then acc + k else fixedMid3 (n - 1) k (acc + n)
-termination_by n
-
-/-- A non-recursive function with a recursive `where` helper. -/
-def whereHelper (n : Nat) : Nat := go n 0
-where go (i acc : Nat) : Nat := if i = 0 then acc else go (i - 1) (acc + i)
-termination_by i
-
-/-- Two-scrutinee `match` with a nested call (Ackermann-like). -/
-def ackLike : Nat → Nat → Nat
-  | 0, m => m + 1
-  | n + 1, 0 => ackLike n 1
-  | n + 1, m + 1 => ackLike n (ackLike (n + 1) m)
-termination_by n m => (n, m)
-
-/-- An `if` in the argument of a recursive call. -/
-def ifArg (n : Nat) : Nat := if n = 0 then 0 else ifArg (if n % 2 = 0 then n / 2 else n - 1) + 1
-termination_by n
-decreasing_by split <;> omega
-
-/-- The decrease is proved by a `have` that uses the hypothesis of the `if h : …`. -/
-def haveProof (n : Nat) : Nat := if h : n = 0 then 0 else
-  have : n / 2 < n := Nat.div_lt_self (by omega) (by omega)
-  haveProof (n / 2) + 1
-
-/-! ## Rejected: control flow the capture does not translate (grammar already sufficient) -/
-
-/-- A recursive call inside a branch of an `if` that is not in tail position. -/
-def callInInnerIf (n : Nat) : Nat :=
-  if n = 0 then 0 else 1 + (if n % 2 = 0 then callInInnerIf (n / 2) else callInInnerIf (n - 1))
-termination_by n
-decreasing_by all_goals omega
-
-/-- `match` on a `Bool`. -/
-def boolMatch (b : Bool) (n : Nat) : Nat := match b with
-  | true => if n = 0 then 1 else boolMatch false (n - 1)
-  | false => if n = 0 then 0 else boolMatch true (n - 1)
-termination_by n
-
-/-- `match` with literal patterns other than `0` / `n + 1`. -/
-def litPatterns : Nat → Nat
-  | 0 => 0
-  | 1 => 1
-  | 5 => 50
-  | n + 2 => litPatterns n + 1
-
-/-- A recursive call on the right of `&&` in non-tail position. -/
-def callInAnd (n : Nat) : Bool := if n = 0 then true else !(n % 3 == 0 && callInAnd (n - 1))
-termination_by n
-
-
-/-- `match h : e with`, which names the equation. -/
-def matchEq (n : Nat) : Nat := match _h : n % 3 with
-  | 0 => if n = 0 then 0 else matchEq (n - 1)
-  | _ => if n = 0 then 1 else matchEq (n - 1)
-termination_by n
-
-/-! ## Rejected: operators missing from the grammar -/
-
-def usesPow (n : Nat) : Nat := if n = 0 then 1 else 2 ^ n + usesPow (n - 1)
-termination_by n
-
-def usesMin (a b : Nat) : Nat := if b = 0 then a else usesMin (min a b) (b - 1)
-termination_by b
-
-def usesBne (n : Nat) : Nat := if n != 0 then usesBne (n - 1) + 1 else 0
-termination_by n
-decreasing_by simp_all; omega
-
-def usesShift (n : Nat) : Nat := if n = 0 then 0 else 1 + usesShift (n >>> 1)
-termination_by n
-decreasing_by simp only [Nat.shiftRight_eq_div_pow]; omega
-
-def usesLibFns (n : Nat) : Nat := if n = 0 then 0 else Nat.gcd n 6 + usesLibFns (Nat.pred n)
-termination_by n
-decreasing_by simp_wf; omega
-
-def usesDvd (n : Nat) : Nat := if n = 0 then 0 else (if 3 ∣ n then 1 else 0) + usesDvd (n - 1)
-termination_by n
-
-def usesXor (b : Bool) (n : Nat) : Bool := if n = 0 then b else usesXor (xor b true) (n - 1)
-termination_by n
-
-/-! ## Rejected: types other than `Nat` and `Bool` -/
-
-def fibPair : Nat → Nat × Nat
-  | 0 => (0, 1)
-  | n + 1 => let p := fibPair n; (p.2, p.1 + p.2)
-
-def intDown (n : Int) : Int := if n ≤ 0 then 0 else intDown (n - 1) + 2
-termination_by n.toNat
-
-def listSum : List Nat → Nat
-  | [] => 0
-  | x :: xs => x + listSum xs
-
-/-- Result in a subtype, so that the result's bound is available to termination proofs. -/
-def boundedRes (n : Nat) : {r : Nat // r ≤ n} := if h : n = 0 then ⟨0, by omega⟩ else
-  let r := boundedRes (n - 1); ⟨r.1, by have := r.2; omega⟩
-termination_by n
-
-/-! ## Rejected: higher-order code -/
-
-/-- A recursive call under a `fun` (via `List.attach`). -/
-def underLambda (n : Nat) : Nat :=
-  if n = 0 then 1 else ((List.range n).attach.map fun ⟨i, _⟩ => underLambda i).sum
-termination_by n
-decreasing_by rename_i h; simp at h; omega
-
-/-- A bounded `for` loop (terminating, unlike `while`). -/
-def forRange (n : Nat) : Nat := Id.run do
-  let mut s := 0
-  for i in [0:n] do s := s + i
-  return s
-
-/-- A library iterator with a function argument. -/
-def usesFold (n : Nat) : Nat := Nat.fold n (fun i _ acc => acc + i) 0
-
-end Gaps
 
 namespace GapsPCL
 
@@ -179,6 +43,126 @@ theorem ifArg_agree : ∀ n, PCL.Term.eval ifArg_term n = ifArg n := by wf_agree
 def haveProof_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term haveProof
 theorem haveProof_agree : ∀ n, PCL.Term.eval haveProof_term n = haveProof n := by wf_agree
 
+/-! ### Closed gaps: control flow and operators -/
+
+def callInInnerIf_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term callInInnerIf
+theorem callInInnerIf_agree : ∀ n, PCL.Term.eval callInInnerIf_term n = callInInnerIf n := by wf_agree
+def boolMatch_term : PCL.Term ⟨[.bool, .nat], .nat⟩ := #lean_wf_func_to_term boolMatch
+theorem boolMatch_agree : ∀ b n, PCL.Term.eval boolMatch_term b n = boolMatch b n := by wf_agree
+def litPatterns_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term litPatterns
+theorem litPatterns_agree : ∀ n, PCL.Term.eval litPatterns_term n = litPatterns n := by wf_agree
+def callInAnd_term : PCL.Term ⟨[.nat], .bool⟩ := #lean_wf_func_to_term callInAnd
+theorem callInAnd_agree : ∀ n, PCL.Term.eval callInAnd_term n = callInAnd n := by wf_agree
+def matchEq_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term matchEq
+theorem matchEq_agree : ∀ n, PCL.Term.eval matchEq_term n = matchEq n := by wf_agree
+def usesPow_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term usesPow
+theorem usesPow_agree : ∀ n, PCL.Term.eval usesPow_term n = usesPow n := by wf_agree
+def usesMin_term : PCL.Term ⟨[.nat, .nat], .nat⟩ := #lean_wf_func_to_term usesMin
+theorem usesMin_agree : ∀ a b, PCL.Term.eval usesMin_term a b = usesMin a b := by wf_agree
+def usesBne_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term usesBne
+theorem usesBne_agree : ∀ n, PCL.Term.eval usesBne_term n = usesBne n := by wf_agree
+def usesShift_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term usesShift
+theorem usesShift_agree : ∀ n, PCL.Term.eval usesShift_term n = usesShift n := by wf_agree
+def usesLibFns_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term usesLibFns
+theorem usesLibFns_agree : ∀ n, PCL.Term.eval usesLibFns_term n = usesLibFns n := by wf_agree
+def usesDvd_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term usesDvd
+theorem usesDvd_agree : ∀ n, PCL.Term.eval usesDvd_term n = usesDvd n := by wf_agree
+def usesXor_term : PCL.Term ⟨[.bool, .nat], .bool⟩ := #lean_wf_func_to_term usesXor
+theorem usesXor_agree : ∀ b n, PCL.Term.eval usesXor_term b n = usesXor b n := by wf_agree
+
+/-! ### Closed gaps: types other than `Nat` and `Bool`, postconditions -/
+
+def fibPair_term : PCL.Term ⟨[.nat], .prod .nat .nat⟩ := #lean_wf_func_to_term fibPair
+theorem fibPair_agree : ∀ n, PCL.Term.eval fibPair_term n = fibPair n := by wf_agree
+
+def intDown_term : PCL.Term ⟨[.int], .int⟩ := #lean_wf_func_to_term intDown
+theorem intDown_agree : ∀ n, PCL.Term.eval intDown_term n = intDown n := by wf_agree
+
+def listSum_term : PCL.Term ⟨[.list .nat], .nat⟩ := #lean_wf_func_to_term listSum
+theorem listSum_agree : ∀ l, PCL.Term.eval listSum_term l = listSum l := by wf_agree
+
+/-- A subtype result `{r // r ≤ n}` becomes the postcondition `fun e v => v ≤ e.1` of the
+program: it is part of the program's type, so every run satisfies it
+(`PCL.PTerm.run_post`). -/
+def boundedRes_term : PCL.Term ⟨[.nat], .nat⟩ (fun e v => v ≤ e.1) :=
+  #lean_wf_func_to_term boundedRes
+theorem boundedRes_agree : ∀ n, PCL.Term.eval boundedRes_term n = (boundedRes n).val := by
+  wf_agree
+
+/-- The decrease proof of the second recursive call uses the postcondition of the first
+one. -/
+def nestedBound_term : PCL.Term ⟨[.nat], .nat⟩ (fun e v => v ≤ e.1) :=
+  #lean_wf_func_to_term nestedBound
+theorem nestedBound_agree : ∀ n, PCL.Term.eval nestedBound_term n = (nestedBound n).val := by
+  wf_agree
+
+/-- The postcondition, for free. -/
+theorem nestedBound_term_le (n : Nat) : PCL.Term.eval nestedBound_term n ≤ n :=
+  PCL.PTerm.run_post nestedBound_term (n, ()) trivial
+
+def swapSteps_term : PCL.Term ⟨[.nat, .prod .nat .nat], .prod .nat .nat⟩ :=
+  #lean_wf_func_to_term swapSteps
+theorem swapSteps_agree : ∀ k p, PCL.Term.eval swapSteps_term k p = swapSteps k p := by
+  wf_agree
+
+def intSteps_term : PCL.Term ⟨[.int, .int], .int⟩ := #lean_wf_func_to_term intSteps
+theorem intSteps_agree : ∀ n a, PCL.Term.eval intSteps_term n a = intSteps n a := by wf_agree
+
+def listRev_term : PCL.Term ⟨[.list .nat, .list .nat], .list .nat⟩ :=
+  #lean_wf_func_to_term listRev
+theorem listRev_agree : ∀ l a, PCL.Term.eval listRev_term l a = listRev l a := by wf_agree
+
+def listPairs_term : PCL.Term ⟨[.list .nat], .list (.prod .nat .nat)⟩ :=
+  #lean_wf_func_to_term listPairs
+theorem listPairs_agree : ∀ l, PCL.Term.eval listPairs_term l = listPairs l := by wf_agree
+
+def listHalve_term : PCL.Term ⟨[.list .nat], .list .nat⟩ := #lean_wf_func_to_term listHalve
+theorem listHalve_agree : ∀ l, PCL.Term.eval listHalve_term l = listHalve l := by wf_agree
+
+/-! ### Closed gaps: bounded loops
+
+A `for i in [a:b]` loop (in `Id`) and `Nat.fold` are rewritten into `WFLang.rangeLoop`, a
+first-order well-founded function with a function parameter (the loop body), which is then
+specialised to the known loop body: a nested `fix` whose measure is `stop - i`. -/
+
+def forRange_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term forRange
+theorem forRange_agree : ∀ n, PCL.Term.eval forRange_term n = forRange n := by wf_agree
+
+def usesFold_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term usesFold
+theorem usesFold_agree : ∀ n, PCL.Term.eval usesFold_term n = usesFold n := by wf_agree
+
+/-- A specialised call: the free variable `k` of the function argument becomes an extra
+parameter of the nested `fix` capturing `Tco.iter (fun x => x + k)`. -/
+def useIter_term : PCL.Term ⟨[.nat, .nat], .nat⟩ := #lean_wf_func_to_term useIter
+theorem useIter_agree : ∀ k n, PCL.Term.eval useIter_term k n = useIter k n := by wf_agree
+
+/-! ### Closed gaps: recursion through a function argument
+
+`f` calls a recursive function `g` with a function argument that calls `f` again (a `for` loop
+or `Nat.fold` whose body calls `f`, or a user-defined higher-order function).  `f` and the copy
+of `g` specialised to that argument are captured as **one** local recursive function, with a
+tag parameter selecting `f` (tag `0`) or `g` (tag `1`).  Its relation is `WFLang.hoRel`: calls
+of `f` go down along `f`'s own relation, calls of `g` along `g`'s, entering `g` from `f x` is a
+decrease if every call of `f` that the function argument can make is below `x`, and the
+function argument calling `f` is a decrease.  The body stays in strict A-normal form. -/
+
+def loopRec_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term loopRec
+theorem loopRec_agree : ∀ n, PCL.Term.eval loopRec_term n = loopRec n := by wf_agree
+
+def foldRec_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term foldRec
+theorem foldRec_agree : ∀ n, PCL.Term.eval foldRec_term n = foldRec n := by wf_agree
+
+def viaApplyN_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term viaApplyN
+theorem viaApplyN_agree : ∀ n, PCL.Term.eval viaApplyN_term n = viaApplyN n := by wf_agree
+
+def useHyperWhile_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term useHyperWhile
+theorem useHyperWhile_agree : ∀ n, PCL.Term.eval useHyperWhile_term n = useHyperWhile n := by
+  wf_agree
+
+def sumHyperTCO_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term sumHyperTCO
+theorem sumHyperTCO_agree : ∀ n, PCL.Term.eval sumHyperTCO_term n = sumHyperTCO n := by
+  wf_agree
+
 end GapsPCL
 
 open WFLang Gaps GapsPCL
@@ -202,80 +186,67 @@ open WFLang Gaps GapsPCL
 #eval (List.range 4).all fun n => (List.range 5).all fun m =>
   PCL.Term.eval ackLike_term n m == ackLike n m
 
+/-- info: true -/
+#guard_msgs in
+#eval (List.range 40).all fun n =>
+  PCL.Term.eval callInInnerIf_term n == callInInnerIf n &&
+  PCL.Term.eval boolMatch_term true n == boolMatch true n &&
+  PCL.Term.eval boolMatch_term false n == boolMatch false n &&
+  PCL.Term.eval litPatterns_term n == litPatterns n &&
+  PCL.Term.eval callInAnd_term n == callInAnd n &&
+  PCL.Term.eval matchEq_term n == matchEq n &&
+  PCL.Term.eval usesPow_term n == usesPow n &&
+  PCL.Term.eval usesBne_term n == usesBne n &&
+  PCL.Term.eval usesShift_term n == usesShift n &&
+  PCL.Term.eval usesLibFns_term n == usesLibFns n &&
+  PCL.Term.eval usesDvd_term n == usesDvd n &&
+  PCL.Term.eval usesXor_term true n == usesXor true n &&
+  PCL.Term.eval usesXor_term false n == usesXor false n &&
+  (List.range 12).all fun a => PCL.Term.eval usesMin_term a n == usesMin a n
+
+/-- info: true -/
+#guard_msgs in
+#eval (List.range 30).all fun n =>
+  PCL.Term.eval fibPair_term n == fibPair n &&
+  PCL.Term.eval boundedRes_term n == (boundedRes n).val &&
+  PCL.Term.eval swapSteps_term n (n, 1) == swapSteps n (n, 1) &&
+  PCL.Term.eval listSum_term (List.range n) == listSum (List.range n) &&
+  PCL.Term.eval listRev_term (List.range n) [n] == listRev (List.range n) [n] &&
+  PCL.Term.eval listPairs_term (List.range n) == listPairs (List.range n) &&
+  PCL.Term.eval listHalve_term (List.range n) == listHalve (List.range n) &&
+  [-3, 0, 7].all fun (a : Int) =>
+    PCL.Term.eval intDown_term (n - 10 : Int) == intDown (n - 10 : Int) &&
+    PCL.Term.eval intSteps_term (n - 5 : Int) a == intSteps (n - 5 : Int) a
+
+/-- info: true -/
+#guard_msgs in
+#eval (List.range 30).all fun n =>
+  PCL.Term.eval forRange_term n == forRange n && PCL.Term.eval usesFold_term n == usesFold n &&
+  PCL.Term.eval useIter_term 3 n == useIter 3 n
+
+/-- info: true -/
+#guard_msgs in
+#eval (List.range 10).all fun n =>
+  PCL.Term.eval loopRec_term n == loopRec n && PCL.Term.eval foldRec_term n == foldRec n &&
+  PCL.Term.eval viaApplyN_term n == viaApplyN n &&
+  PCL.Term.eval sumHyperTCO_term n == sumHyperTCO n
+
+-- `useHyperWhile n` computes the `n`-th hyperoperation (`useHyperWhile 5` is `2 ↑↑↑ 3 + 1`).
+/-- info: true -/
+#guard_msgs in
+#eval (List.range 5).all fun n => PCL.Term.eval useHyperWhile_term n == useHyperWhile n
+
+-- `nestedBound` makes `2 ^ n` calls, so it is only checked on small inputs.
+/-- info: true -/
+#guard_msgs in
+#eval (List.range 12).all fun n => PCL.Term.eval nestedBound_term n == (nestedBound n).val
+
 /-! ## Rejections -/
 
-/-- info: rejected: #lean_wf_func_to_term: recursive call in an unsupported position -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term callInInnerIf : PCL.Term ⟨[.nat], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: recursive call in an unsupported position -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term boolMatch : PCL.Term ⟨[.bool, .nat], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: recursive call in an unsupported position -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term litPatterns : PCL.Term ⟨[.nat], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: recursive call in an unsupported position -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term callInAnd : PCL.Term ⟨[.nat], .bool⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: recursive call in an unsupported position -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term matchEq : PCL.Term ⟨[.nat], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term usesPow : PCL.Term ⟨[.nat], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term usesMin : PCL.Term ⟨[.nat, .nat], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term usesBne : PCL.Term ⟨[.nat], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term usesShift : PCL.Term ⟨[.nat], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term usesLibFns : PCL.Term ⟨[.nat], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: unsupported condition -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term usesDvd : PCL.Term ⟨[.nat], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term usesXor : PCL.Term ⟨[.bool, .nat], .bool⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: unsupported type Nat × Nat (only Nat and Bool) -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term fibPair : PCL.Term ⟨[.nat], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: unsupported type Int (only Nat and Bool) -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term intDown : PCL.Term ⟨[.nat], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: unsupported type List Nat (only Nat and Bool) -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term listSum : PCL.Term ⟨[.nat], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: unsupported type { r // r ≤ n } (only Nat and Bool) -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term boundedRes : PCL.Term ⟨[.nat], .nat⟩)
-
+-- A recursive call under `fun` in `List.map` over `List.attach`: `List.map` is a library
+-- function (not specialised), and the elements of `attach` are subtypes whose property the
+-- termination proof needs.
 /-- info: rejected: #lean_wf_func_to_term: recursive call in an unsupported position -/
 #guard_msgs in
 #expect_reject (#lean_wf_func_to_term underLambda : PCL.Term ⟨[.nat], .nat⟩)
 
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term forRange : PCL.Term ⟨[.nat], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term usesFold : PCL.Term ⟨[.nat], .nat⟩)

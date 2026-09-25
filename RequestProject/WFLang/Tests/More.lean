@@ -95,4 +95,26 @@ theorem gcdLoop_agree : ∀ n a, Term.eval gcdLoop_term n a = gcdLoop n a := by 
 def mc91TR_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term Tco.mc91TR
 theorem mc91TR_agree : ∀ n, Term.eval mc91TR_term n = Tco.mc91TR n := by wf_agree
 
+/-! ### Mutual recursion
+
+A group of mutually recursive functions is captured as **one** local recursive function whose
+first parameter is a tag selecting the member; a call of the `i`-th member is a recursive call
+with tag `i`.  The relation is the one Lean built for the group, pulled back along
+`(i, xs) ↦ PSum.inl/inr xs`. -/
+
+def isEven_term : Term ⟨[.nat], .bool⟩ := #lean_wf_func_to_term Mutual.isEven
+theorem isEven_agree : ∀ n, Term.eval isEven_term n = Mutual.isEven n := by wf_agree
+
+def isOdd_term : Term ⟨[.nat], .bool⟩ := #lean_wf_func_to_term Mutual.isOdd
+theorem isOdd_agree : ∀ n, Term.eval isOdd_term n = Mutual.isOdd n := by wf_agree
+
+def downA_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term Mutual.downA
+theorem downA_agree : ∀ n, Term.eval downA_term n = Mutual.downA n := by wf_agree
+
+def downB_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term Mutual.downB
+theorem downB_agree : ∀ n, Term.eval downB_term n = Mutual.downB n := by wf_agree
+
+def mod3b_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term Mutual.mod3b
+theorem mod3b_agree : ∀ n, Term.eval mod3b_term n = Mutual.mod3b n := by wf_agree
+
 end MorePCL

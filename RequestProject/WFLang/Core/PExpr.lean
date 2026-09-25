@@ -16,6 +16,7 @@ inductive PExpr (Γ : List Ty) : Ty → Type where
   | lit (t : Ty) : t.denote → PExpr Γ t
   | bin {a b c : Ty} : BinOp a b c → PExpr Γ a → PExpr Γ b → PExpr Γ c
   | not : PExpr Γ .bool → PExpr Γ .bool
+  | un {a b : Ty} : UnOp a b → PExpr Γ a → PExpr Γ b
   | ite {t : Ty} : PExpr Γ .bool → PExpr Γ t → PExpr Γ t → PExpr Γ t
 
 /-- Lists of call-free expressions (argument tuples). -/
@@ -28,6 +29,7 @@ def PExpr.eval {Γ : List Ty} (env : Env Γ) : {t : Ty} → PExpr Γ t → t.den
   | _, .lit _ v => v
   | _, .bin op a b => op.eval (a.eval env) (b.eval env)
   | _, .not a => !(a.eval env)
+  | _, .un op a => op.eval (a.eval env)
   | _, .ite c a b => if c.eval env then a.eval env else b.eval env
 
 def PExprs.eval {Γ : List Ty} (env : Env Γ) : {ts : List Ty} → PExprs Γ ts → Env ts
@@ -40,6 +42,7 @@ def PExpr.wk {s : Ty} {Γ : List Ty} : {t : Ty} → PExpr Γ t → PExpr (s :: �
   | _, .lit t v => .lit t v
   | _, .bin op a b => .bin op a.wk b.wk
   | _, .not a => .not a.wk
+  | _, .un op a => .un op a.wk
   | _, .ite c a b => .ite c.wk a.wk b.wk
 
 /-- Weaken an argument tuple by one variable. -/
@@ -59,6 +62,7 @@ theorem PExpr.wk_eval {s : Ty} {Γ : List Ty} (v : s.denote) (env : Env Γ) :
   | _, .lit _ _ => rfl
   | _, .bin op a b => by simp only [wk, eval, wk_eval v env a, wk_eval v env b]
   | _, .not a => by simp only [wk, eval, wk_eval v env a]
+  | _, .un op a => by simp only [wk, eval, wk_eval v env a]
   | _, .ite c a b => by simp only [wk, eval, wk_eval v env c, wk_eval v env a, wk_eval v env b]
 
 theorem PExprs.wk_eval {s : Ty} {Γ : List Ty} (v : s.denote) (env : Env Γ) :

@@ -12,7 +12,8 @@ import RequestProject.WFLang.Tests.Functions
   `countCoprime`; `fact` in `sumFacts`; several of them in `chain`; two loops in `twoLoops`;
   `Tco.mc91Loop` in the uploaded `Tco.mc91TR`);
 * a call of a recursive function inside the body of a recursive function (`gcdLoop`);
-* a pair of functions that must be **rejected** (`Mutual.isEven`/`isOdd`: mutual recursion).
+* **mutual recursion**: `Mutual.isEven`/`isOdd` (structural), `Mutual.downA`/`downB`
+  (well-founded, `termination_by`), `Mutual.mod3a`/`mod3b`/`mod3c` (a group of three).
 
 The captures and agreement theorems are in `More.lean`, the runtime checks and rejections in
 `MoreChecks.lean`.
@@ -110,6 +111,27 @@ def isEven : Nat → Bool
 def isOdd : Nat → Bool
   | 0 => false
   | n + 1 => isEven n
+end
+
+mutual
+/-- Well-founded mutual recursion (`termination_by`). -/
+def downA (n : Nat) : Nat := if n ≤ 1 then n else downB (n - 1) + 1
+termination_by n
+def downB (n : Nat) : Nat := if n ≤ 1 then 1 else downA (n / 2) * 2
+termination_by n
+end
+
+mutual
+/-- A group of three functions. -/
+def mod3a : Nat → Nat
+  | 0 => 0
+  | n + 1 => mod3b n
+def mod3b : Nat → Nat
+  | 0 => 1
+  | n + 1 => mod3c n
+def mod3c : Nat → Nat
+  | 0 => 2
+  | n + 1 => mod3a n
 end
 
 end More.Mutual

@@ -1,11 +1,15 @@
 /-!
 # Core of `PCL`: types, environments, variables, operators
 
-* object types `Ty` (`nat`, `bool`) and their denotation,
+* object types `Ty` (`nat`, `bool`, `int`, pairs `prod s t`, lists `list t`) and their
+  denotation,
 * environments `Env Γ` (right-nested tuples) and typed de Bruijn variables `Var Γ t`,
 * signatures `Sig` of recursive functions, curried function types `FnType` and
   (un)currying,
-* the primitive binary operators `BinOp` (`+ - * / %`, `<`, `≤`, `bool_eq`, `&&`, `||`).
+* the primitive binary operators `BinOp` (`+ - * / %`, `<`, `≤`, `bool_eq`, `&&`, `||`, and
+  more: `^`, shifts, bitwise operators, `gcd`, `lcm`, the same arithmetic on `Int`, pairing,
+  `cons`, `++`) and unary operators `UnOp` (`log2`, `Int` negation and conversions,
+  projections, `head`, `tail`, `isNil`, `length`).
 -/
 
 namespace WFLang
@@ -14,17 +18,42 @@ namespace WFLang
 inductive Ty where
   | nat
   | bool
+  | int
+  | prod (s t : Ty)
+  | list (t : Ty)
   deriving DecidableEq, Repr
 
 /-- Denotation of object types. -/
 @[reducible] def Ty.denote : Ty → Type
   | .nat => Nat
   | .bool => Bool
+  | .int => Int
+  | .prod s t => s.denote × t.denote
+  | .list t => List t.denote
+
+/-- Decidable equality of the denotations. -/
+instance Ty.decEq : (t : Ty) → DecidableEq t.denote
+  | .nat => inferInstanceAs (DecidableEq Nat)
+  | .bool => inferInstanceAs (DecidableEq Bool)
+  | .int => inferInstanceAs (DecidableEq Int)
+  | .prod s t => @instDecidableEqProd _ _ (Ty.decEq s) (Ty.decEq t)
+  | .list t => @instDecidableEqList _ (Ty.decEq t)
 
 /-- `bool_eq` at every object type. -/
 def Ty.beq : (t : Ty) → t.denote → t.denote → Bool
   | .nat, a, b => @BEq.beq Nat _ a b
   | .bool, a, b => @BEq.beq Bool _ a b
+  | .int, a, b => @BEq.beq Int _ a b
+  | .prod s t, a, b => s.beq a.1 b.1 && t.beq a.2 b.2
+  | .list t, a, b => @decide (a = b) (Ty.decEq (.list t) a b)
+
+/-- A default value of every type (the value of `head []`). -/
+def Ty.default : (t : Ty) → t.denote
+  | .nat => (0 : Nat)
+  | .bool => false
+  | .int => (0 : Int)
+  | .prod s t => (s.default, t.default)
+  | .list _ => ([] : List _)
 
 /-- Environments: right-nested tuples `(v₁, (v₂, … , ()))`. -/
 @[reducible] def Env : List Ty → Type
@@ -94,6 +123,31 @@ inductive BinOp : Ty → Ty → Ty → Type where
   | beq (t : Ty) : BinOp t t .bool
   | and : BinOp .bool .bool .bool
   | or : BinOp .bool .bool .bool
+  /-- `xor` on booleans. -/
+  | bxor : BinOp .bool .bool .bool
+  | pow : BinOp .nat .nat .nat
+  | shiftLeft : BinOp .nat .nat .nat
+  | shiftRight : BinOp .nat .nat .nat
+  /-- bitwise `&&&`, `|||`, `^^^` on `Nat`. -/
+  | land : BinOp .nat .nat .nat
+  | lor : BinOp .nat .nat .nat
+  | xor : BinOp .nat .nat .nat
+  | gcd : BinOp .nat .nat .nat
+  | lcm : BinOp .nat .nat .nat
+  /-- `Int` arithmetic and comparisons. -/
+  | iadd : BinOp .int .int .int
+  | isub : BinOp .int .int .int
+  | imul : BinOp .int .int .int
+  | idiv : BinOp .int .int .int
+  | imod : BinOp .int .int .int
+  | ilt : BinOp .int .int .bool
+  | ile : BinOp .int .int .bool
+  /-- `(a, b)` -/
+  | pair (s t : Ty) : BinOp s t (.prod s t)
+  /-- `a :: l` -/
+  | cons (t : Ty) : BinOp t (.list t) (.list t)
+  /-- `l₁ ++ l₂` -/
+  | append (t : Ty) : BinOp (.list t) (.list t) (.list t)
 
 /-- Meaning of the primitive operators. -/
 def BinOp.eval : {a b c : Ty} → BinOp a b c → a.denote → b.denote → c.denote
@@ -107,6 +161,58 @@ def BinOp.eval : {a b c : Ty} → BinOp a b c → a.denote → b.denote → c.de
   | _, _, _, .beq t, x, y => t.beq x y
   | _, _, _, .and, x, y => (x && y : Bool)
   | _, _, _, .or, x, y => (x || y : Bool)
+  | _, _, _, .bxor, x, y => Bool.xor x y
+  | _, _, _, .pow, x, y => @HPow.hPow Nat Nat Nat _ x y
+  | _, _, _, .shiftLeft, x, y => @HShiftLeft.hShiftLeft Nat Nat Nat _ x y
+  | _, _, _, .shiftRight, x, y => @HShiftRight.hShiftRight Nat Nat Nat _ x y
+  | _, _, _, .land, x, y => @HAnd.hAnd Nat Nat Nat _ x y
+  | _, _, _, .lor, x, y => @HOr.hOr Nat Nat Nat _ x y
+  | _, _, _, .xor, x, y => @HXor.hXor Nat Nat Nat _ x y
+  | _, _, _, .gcd, x, y => Nat.gcd x y
+  | _, _, _, .lcm, x, y => Nat.lcm x y
+  | _, _, _, .iadd, x, y => @HAdd.hAdd Int Int Int _ x y
+  | _, _, _, .isub, x, y => @HSub.hSub Int Int Int _ x y
+  | _, _, _, .imul, x, y => @HMul.hMul Int Int Int _ x y
+  | _, _, _, .idiv, x, y => @HDiv.hDiv Int Int Int _ x y
+  | _, _, _, .imod, x, y => @HMod.hMod Int Int Int _ x y
+  | _, _, _, .ilt, x, y => decide (@LT.lt Int _ x y)
+  | _, _, _, .ile, x, y => decide (@LE.le Int _ x y)
+  | _, _, _, .pair _ _, x, y => (x, y)
+  | _, _, _, .cons _, x, y => x :: y
+  | _, _, _, .append _, x, y => x ++ y
+
+/-- Primitive unary operators, typed (`!` is the separate constructor `PExpr.not`). -/
+inductive UnOp : Ty → Ty → Type where
+  | log2 : UnOp .nat .nat
+  /-- `-x` on `Int` -/
+  | ineg : UnOp .int .int
+  /-- `Int.toNat` -/
+  | toNat : UnOp .int .nat
+  /-- `Int.natAbs` -/
+  | natAbs : UnOp .int .nat
+  /-- the cast `Nat → Int` -/
+  | ofNat : UnOp .nat .int
+  | fst (s t : Ty) : UnOp (.prod s t) s
+  | snd (s t : Ty) : UnOp (.prod s t) t
+  /-- `l.headD default` (only used where `l` is known to be non-empty) -/
+  | head (t : Ty) : UnOp (.list t) t
+  | tail (t : Ty) : UnOp (.list t) (.list t)
+  | isNil (t : Ty) : UnOp (.list t) .bool
+  | length (t : Ty) : UnOp (.list t) .nat
+
+/-- Meaning of the unary operators. -/
+def UnOp.eval : {a b : Ty} → UnOp a b → a.denote → b.denote
+  | _, _, .log2, x => Nat.log2 x
+  | _, _, .ineg, x => @Neg.neg Int _ x
+  | _, _, .toNat, x => Int.toNat x
+  | _, _, .natAbs, x => Int.natAbs x
+  | _, _, .ofNat, x => ((x : Nat) : Int)
+  | _, _, .fst _ _, x => x.1
+  | _, _, .snd _ _, x => x.2
+  | _, _, .head t, x => x.headD t.default
+  | _, _, .tail _, x => x.tail
+  | _, _, .isNil _, x => x.isEmpty
+  | _, _, .length _, x => x.length
 
 /-! ## Relations with fixed parameters -/
 
@@ -151,5 +257,88 @@ theorem fixedAtRel_wf {Γ : List Ty} {K : Type} {D : Sort _} {f : Env Γ → K} 
     obtain ⟨hfy, hr⟩ := hy
     subst hf hg
     exact IH (g y) hr y hfy rfl
+
+/-- A relation on `Env Γ` for a function with a *precondition* `pre` (proof parameters):
+related environments satisfy `pre`, agree on their fixed components (read by `f`), and their
+packings `g x hx` (which may contain the proofs) are related by `r k`, where `k` are the fixed
+values.  The capture elaborator uses it for functions such as `def f (n : Nat) (h : P n)`,
+whose Lean fixpoint runs on the dependent pairs `⟨n, h⟩`. -/
+def preRel {Γ : List Ty} {K : Type} {D : Sort _} (pre : Env Γ → Prop) (f : Env Γ → K)
+    (g : (x : Env Γ) → pre x → D) (r : K → D → D → Prop) : Env Γ → Env Γ → Prop :=
+  fun x y => ∃ (hx : pre x) (hy : pre y), f x = f y ∧ r (f y) (g x hx) (g y hy)
+
+theorem preRel_wf {Γ : List Ty} {K : Type} {D : Sort _} {pre : Env Γ → Prop} {f : Env Γ → K}
+    {g : (x : Env Γ) → pre x → D} {r : K → D → D → Prop} (h : ∀ k, WellFounded (r k)) :
+    WellFounded (preRel pre f g r) := by
+  suffices H : ∀ k d, ∀ x (hx : pre x), f x = k → g x hx = d → Acc (preRel pre f g r) x by
+    refine ⟨fun x => Acc.intro _ fun y hy => ?_⟩
+    obtain ⟨hy', _, _, _⟩ := hy
+    exact H _ _ y hy' rfl rfl
+  intro k d
+  induction d using (h k).induction with
+  | _ d IH =>
+    intro x hx hf hg
+    refine Acc.intro _ fun y hy => ?_
+    obtain ⟨hy', hx', hfy, hr⟩ := hy
+    subst hf hg
+    exact IH (g y hy') hr y hy' hfy rfl
+
+/-! ## Relations for recursion through a function argument -/
+
+/-- The relation of the local recursive function that captures a Lean function `f` together
+with the copy of a function `g` specialised to a function argument which itself calls `f`
+(e.g. `f (n+1) = g (fun r => f n r) …`, as in `for` loops whose body calls `f`).  States are
+`Sum.inl x` (a call `f x`) and `Sum.inr y` (a call of the specialised `g`, whose lifted
+variables, the free variables of the function argument, are `lam y`).  `Call x k` says that
+the function argument with lifted variables `k` may call `f x`:
+
+* `f x' < f x` if `Rf x' x` (the recursion of `f`);
+* `g y < f x` (entering `g` from `f x`) if every call `f x'` the function argument may make is
+  `Rf`-below `x`;
+* `g y' < g y` if they have the same lifted variables and `Rg y' y` (the recursion of `g`);
+* `f x' < g y` if the function argument of `g y` may call `f x'`. -/
+def hoRel {X Y K : Type} (Rf : X → X → Prop) (Rg : Y → Y → Prop) (lam : Y → K)
+    (Call : X → K → Prop) : X ⊕ Y → X ⊕ Y → Prop
+  | .inl x', .inl x => Rf x' x
+  | .inr y, .inl x => ∀ x', Call x' (lam y) → Rf x' x
+  | .inr y', .inr y => lam y' = lam y ∧ Rg y' y
+  | .inl x', .inr y => Call x' (lam y)
+
+theorem hoRel_wf {X Y K : Type} {Rf : X → X → Prop} {Rg : Y → Y → Prop} {lam : Y → K}
+    {Call : X → K → Prop} (hf : WellFounded Rf) (hg : WellFounded Rg) :
+    WellFounded (hoRel Rf Rg lam Call) := by
+  -- every `f x` is accessible, by induction on `x`; on the way, every `g y` entered from
+  -- `f x`, by induction on `y`
+  have accF : ∀ x, Acc (hoRel Rf Rg lam Call) (.inl x) := by
+    intro x
+    induction x using hf.induction with
+    | _ x IHx =>
+      have accG : ∀ y, (∀ x', Call x' (lam y) → Rf x' x) →
+          Acc (hoRel Rf Rg lam Call) (.inr y) := by
+        intro y
+        induction y using hg.induction with
+        | _ y IHy =>
+          intro hy
+          refine Acc.intro _ fun z hz => ?_
+          match z, hz with
+          | .inl x', hz => exact IHx x' (hy x' hz)
+          | .inr y', ⟨hl, hr⟩ => exact IHy y' hr (fun x' h => hy x' (hl ▸ h))
+      refine Acc.intro _ fun z hz => ?_
+      match z, hz with
+      | .inl x', hz => exact IHx x' hz
+      | .inr y, hz => exact accG y hz
+  -- then every `g y`, by induction on `y`: below it are `g y'` with `Rg y' y`, and calls of `f`
+  have accG : ∀ y, Acc (hoRel Rf Rg lam Call) (.inr y) := by
+    intro y
+    induction y using hg.induction with
+    | _ y IH =>
+      refine Acc.intro _ fun z hz => ?_
+      match z, hz with
+      | .inl x', _ => exact accF x'
+      | .inr y', ⟨_, hr⟩ => exact IH y' hr
+  refine ⟨fun z => ?_⟩
+  match z with
+  | .inl x => exact accF x
+  | .inr y => exact accG y
 
 end WFLang

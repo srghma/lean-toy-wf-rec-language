@@ -113,18 +113,18 @@ elab "#expect_reject " t:term : command => liftTermElabM do
 
 /-! ## Rejections -/
 
--- Mutual recursion is not supported (neither function is a self-recursive function whose body
--- only calls previously captured functions).
-/-- info: rejected: #lean_wf_func_to_term: mutual recursion through More.Mutual.isEven is not supported -/
+-- Mutual recursion (captured in `More.lean`).
+/-- info: true -/
 #guard_msgs in
-#expect_reject (#lean_wf_func_to_term More.Mutual.isEven : PCL.Term ⟨[.nat], .bool⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: mutual recursion through More.Mutual.isOdd is not supported -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term More.Mutual.isOdd : PCL.Term ⟨[.nat], .bool⟩)
+#eval (List.range 60).all fun n =>
+  PCL.Term.eval MorePCL.isEven_term n == More.Mutual.isEven n &&
+  PCL.Term.eval MorePCL.isOdd_term n == More.Mutual.isOdd n &&
+  PCL.Term.eval MorePCL.downA_term n == More.Mutual.downA n &&
+  PCL.Term.eval MorePCL.downB_term n == More.Mutual.downB n &&
+  PCL.Term.eval MorePCL.mod3b_term n == More.Mutual.mod3b n
 
 -- A wrong signature is reported by the elaborator of the program type.
-/-- info: rejected: Application type mismatch: The argument -/
+/-- info: rejected: Type mismatch -/
 #guard_msgs in
 #expect_reject (#lean_wf_func_to_term addK : PCL.Term ⟨[.nat], .nat⟩)
 

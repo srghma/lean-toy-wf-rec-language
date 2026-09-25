@@ -22,18 +22,39 @@ theorem gcd_agree : ∀ m n, Term.eval gcd_term m n = gcd m n := by wf_agree
 
 ## The language (`RequestProject/WFLang/PCL/Lang.lean`)
 
-* Types `nat`, `bool`; typed de Bruijn variables; operators `+ - * / %`, `<`, `≤`, `bool_eq`
-  (`==` at every type), `&&`, `||`, `!`, and `if-then-else`.
-* Well-founded recursion is part of the grammar:
-  * `fix params r R wf body args k` is a local recursive function whose relation `R` is proved
-    well-founded by `wf`;
-  * `fixSelfCall args dec k` is a recursive call carrying its own proof `dec` that the arguments are
-    `R`-smaller. The proof may use the enclosing `if` tests, which are recorded in the type of
-    the expression (the path condition).
+* Types `nat`, `int`, `bool`, pairs `prod s t` and lists `list t`; typed de Bruijn variables.
+* Call-free expressions (`PExpr`, `Core/PExpr.lean`): `+ - * / % ^`, shifts and bitwise
+  operators, `Nat.gcd`/`Nat.lcm`/`Nat.log2`, `<`, `≤`, `bool_eq` (`==` at every type), `&&`,
+  `||`, `!`, `xor`, pairing and projections, `[]`, `::`, `++`, `head`, `tail`, `isNil`,
+  `length`, casts between `Nat` and `Int`.
+* Statements (`Expr`), in **strict A-normal form**:
+
+  ```
+  | ret p                                  -- return a call-free value
+  | ite c a b                              -- if-then-else, tail position only
+  | fixSelfCall args dec hpre k            -- let v := self args in k   (recursive call)
+  | fnCall f args hpre k                   -- let v := f args in k      (local function f)
+  | fix params r R wf pre post body rest   -- letrec f := fix … in rest, tail position only
+  | join s P body m                        -- join j (v : s) := body in m, tail position only
+  | jump j p hpre hpost                    -- jump j p                  (tail position)
+  ```
+
+  The compound statements, `ite` (case), `fix` (local recursive functions, which also
+  encode loops and folds) and `join`, occur only in tail position; the result of every call is
+  bound to a fresh variable. Local functions and join points in scope are indices of `Expr`
+  (typed de Bruijn indices `FnVar` and `JVar`; the join-point scope `JScope` has weakening as a
+  constructor, so moving under a binder costs nothing). A join point names the rest of the
+  computation after a non-tail `if`/`match`; it is not a function (not recursive, only jumped to
+  in tail position, invisible in `fix` bodies). See `GRAMMAR.md` for the design discussion.
+* A `fix` carries its relation `R`, the proof `wf : WellFounded R`, a precondition `pre` and a
+  postcondition `post`. Every recursive call carries its own proof `dec` that the arguments are
+  `R`-smaller. That proof may use the enclosing `if` tests, the precondition and the
+  postconditions of earlier calls, which are recorded in the type of the statement (the path
+  condition).
 * `Expr.eval` is total: structural recursion on the syntax, and `WellFounded.fix` at `fix` nodes.
   It returns a plain value, with no fuel, no `Option` and no runtime checks.
 * Soundness: `fixFn_eq`, meaning a `fix` node satisfies its recursive equation, and `fixFn_unique`,
-  meaning it is the only solution.
+  meaning it is the only solution. `PTerm.run_post`: every result satisfies the postcondition.
 * `PCL/Termination.lean`: every `fix` body reaches a base case (`fix_body_reaches_base`,
   `fix_body_has_base_case`), and a looping program cannot be built (`loop_unbuildable`).
 
@@ -44,26 +65,34 @@ It then writes a `PCL` program that reuses Lean's relation and the decreasing pr
 user's `decreasing_by`. `wf_agree` proves `Term.eval f_term = f` from the uniqueness of the fixpoint.
 The capture supports:
 
-* `if` / `match` on `Nat` / `cond` / `&&` / `||`;
-* non-tail and nested calls;
+* `if` / `match` on `Nat`, `Bool`, pairs and lists, literal patterns, `match h : e with`,
+  `cond`, `&&` / `||`;
+* calls in any position (a non-tail `if`/`match` containing a call becomes
+  `join j (v) := rest in if c then (…; jump j a) else (…; jump j b)`; the rest is copied into
+  both branches instead only when a call in scope has a postcondition, or with
+  `set_option wfLang.joinPoints false`);
 * fixed parameters and structural recursion;
 * calls to other functions: non-recursive functions are inlined, and recursive functions become
-  nested `fix` nodes.
+  local `fix` nodes (`fix g := … in let v := g args in …`);
+* subtype results (postconditions) and proof parameters (preconditions);
+* mutual recursion (one `fix` with a tag parameter);
+* bounded `for` loops and `Nat.fold`, and function parameters specialised to the function
+  passed at each call site, including recursion through a function argument
+  (`Tco.hyperWhile`, `Tco.hyperTCO`, `Tco.ack2`).
 
-It rejects the following with an error message:
-
-* mutual recursion;
-* higher-order functions;
-* `while`/`for` loops, which Lean builds without a termination proof.
+`GAPS.md` lists what is still rejected (e.g. calls under a `fun` in library code such as
+`List.map`, and `while` loops, which Lean builds without a termination proof).
 
 ## Layout
 
 ```
 RequestProject/WFLang.lean          imports everything
 RequestProject/WFLang/
-├── Core/Types.lean                 Ty, Env, Var, Sig, FnType, curryEnv, BinOp, fixedRel
+├── Core/Types.lean                 Ty, Env, Var, Sig, FnType, curryEnv, BinOp, fixedRel, hoRel
+├── Core/Loops.lean                 rangeLoop: first-order form of `for` loops and `Nat.fold`
 ├── Core/PExpr.lean                 call-free expressions PExpr / PExprs
-├── PCL/Lang.lean                   Expr (fix, fixSelfCall, ite, ret), eval, Term, soundness
+├── PCL/Lang.lean                   Expr (ret, ite, fixSelfCall, fnCall, fix, join, jump), eval,
+│                                   Term, soundness
 ├── PCL/Termination.lean            base-case existence, unbuildable loop
 ├── Capture/Meta.lean               reading a Lean function; tactics wf_dec, wf_close
 ├── Capture/Translate.lean          Lean term → PExpr syntax, branch recognition
@@ -79,9 +108,13 @@ RequestProject/WFLang/
     ├── SourceProofs.lean           the theorems of the uploaded files (+ hyperWhile = hyper)
     ├── Sources.lean                every uploaded function: captured or rejected (table),
                                     derived agreement theorems, runtime checks
-    └── Gaps.lean                   coverage gaps: well-founded functions still rejected
-                                    (pinned by #guard_msgs), see GAPS.md
-GAPS.md                             which rejected functions could be supported, and how
+    ├── GapFunctions.lean           the functions of GAPS.md
+    ├── Gaps.lean                   their captures + agreement theorems, and the functions
+    │                               still rejected (pinned by #guard_msgs)
+    └── Joins.lean                  non-tail if/match captured with join points; sizes with
+                                    and without join points
+GAPS.md                             what is supported, how, and what is left
+GRAMMAR.md                          grammar layers: why join points, why no Atom layer
 Bench.lean                          `lake exe wfbench <native|pcl> <m>`
 ```
 

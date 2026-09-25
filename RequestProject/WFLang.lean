@@ -13,7 +13,9 @@ import RequestProject.WFLang.Tests.More
 import RequestProject.WFLang.Tests.MoreChecks
 import RequestProject.WFLang.Tests.SourceProofs
 import RequestProject.WFLang.Tests.Sources
+import RequestProject.WFLang.Tests.GapFunctions
 import RequestProject.WFLang.Tests.Gaps
+import RequestProject.WFLang.Tests.Joins
 
 /-!
 # PCL: a typed toy language capturing well-founded Lean functions

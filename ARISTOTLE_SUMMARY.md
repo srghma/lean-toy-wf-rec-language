@@ -1,3 +1,33 @@
+# Summary of changes for run 5ff14f2e-5c6e-479b-9737-e934b0a09445
+`#lean_wf_func_to_term` now captures every item in GAPS.md except calls under a `fun` inside library code like `List.map` (details below). The language is stricter too: as you asked, local recursive functions and loops now sit only in tail position. `lake build` passes and the tests are part of it. There is no `sorry` or new axiom. `#print axioms` on a sample of the agreement theorems (`hyperWhile_term_agree`, `boom_agree`, `gcdSum_agree`, `isEven_agree`) shows only `propext`, `Quot.sound` and `Classical.choice`.
+
+**The stricter A-normal form** (`RequestProject/WFLang/PCL/Lang.lean`)
+- The grammar now has five statements: `ret`, `ite`, `fixSelfCall`, `fnCall` and `fix`.
+- `ite` (case) and `fix` may only appear in tail position. `fix` is now a `letrec f := fix … in rest`, and its scope is the rest of the computation. Loops and folds are `fix` nodes, so they are in tail position too.
+- Local functions in scope are tracked in the type of an expression. A call to one is the new `let v := f args in k` (`fnCall`), which binds the result and its postcondition.
+- A recursive function called in non-tail position is captured as `fix g := … in let v := g args in k`. A non-tail `if`/`match` containing a call still gets the rest of the computation copied into both branches.
+- The evaluator is still total, with no fuel and no runtime checks. The soundness theorems (`fixFn_eq`, `fixFn_unique`) and the termination theorems (`fix_body_reaches_base`, `loop_unbuildable`) are restated for this grammar and proved again.
+- To make the agreement proofs work with local functions, I added one simplification lemma for calls to the innermost local function.
+
+**What is now captured**, each with an agreement theorem proved by `wf_agree`:
+- **Control flow:** calls in non-tail `if` branches and on the right of `&&`/`||`, `match` on `Bool`, literal patterns, and `match h : e with`.
+- **Operators:** all the listed ones.
+- **Other types:** `Int`, pairs, lists, and subtype results (the postcondition is carried by `fix`).
+- **Loops:** bounded `for` loops and `Nat.fold`.
+- **Function parameters:** specialised to the function passed at each call site. This includes recursion through a function argument, e.g. `Tco.hyperWhile`, `Tco.hyperTCO` and `Tco.ack2`.
+- **Mutual recursion:** one `fix` with a tag argument, reusing Lean's relation.
+- **Proof preconditions:** `Tco.boom` is captured as a program that carries its precondition.
+
+**Still rejected**
+- `underLambda`, a call under `fun` inside `List.map`. Its rejection message is checked by the build.
+- `while` loops, which Lean builds without a termination proof.
+- Mutually recursive functions whose parameter or result types differ.
+- A few restrictions on recursion through a function argument.
+
+GAPS.md §6 lists these, with what each would need.
+
+**Documentation:** README.md now describes the new grammar, what the capture supports, and the updated file layout. GAPS.md has a note on the stricter tail-position rule. The Properties table has updated signatures for the language and soundness theorems, plus new proved entries for the uploaded functions that are now captured directly, the GAPS.md examples, and mutual recursion. All work is committed.
+
 # Summary of changes for run e2e72c9a-f076-4733-89dd-6aeab6e9131c
 To answer this I ran about 25 well-founded, structural and plain Lean functions through `#lean_wf_func_to_term`, rather than guessing from the code. They're all in `RequestProject/WFLang/Tests/Gaps.lean`, and each one's current result is pinned with `#guard_msgs`, so the build fails if support changes. `GAPS.md` has the full classification and a fix plan for each gap. Three of the failures were bugs, which I fixed; the rest are listed below.
 

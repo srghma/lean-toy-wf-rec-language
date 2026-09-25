@@ -1,91 +1,112 @@
-# Well-founded functions that `PCL` / `#lean_wf_func_to_term` do not handle, and what it would take
+# Well-founded functions and `#lean_wf_func_to_term`: what is supported, and what is left
 
-Every example below is a real Lean definition in `RequestProject/WFLang/Tests/Gaps.lean`.
-Next to each one, a `#guard_msgs` block records what the capture does with it today. The file is
-part of the default build, so if any of these behaviours changes, `lake build` fails.
+Every example below is a real Lean definition in the test suite (`RequestProject/WFLang/Tests/`).
+Each captured function has an agreement theorem proved by `wf_agree` and a runtime check
+(`#guard_msgs`); each function that is still rejected has its error message pinned by
+`#guard_msgs`. The test files are part of the default build, so if any of this changes,
+`lake build` fails.
 
-The gaps fall into two groups:
+The soundness argument is the same for every construct. The agreement proof (`wf_agree`) relies
+only on the uniqueness of the `fix` solution (`fixFn_unique`) and on `f.eq_def`. The
+well-founded relation and the decreasing proofs are still the ones Lean built, pulled back to
+the program's parameters (or combined from Lean's relations, for the two new encodings below:
+mutual recursion and recursion through a function argument).
 
-* Some limits come only from the **capture** (`Capture/*.lean`). The `PCL` grammar can already
-  express these functions; the elaborator just does not recognise the Lean term shape.
-* Others need a **grammar extension**: new operators, types or constructs in `Core/` and `PCL/`.
+The language stays in **strict A-normal form**, now also for local functions: arithmetic,
+comparisons, `bool_eq`, `&&`, `||`, `!`, pairs and list operations are call-free `PExpr`s; the
+result of every call is bound to a new variable (`fixSelfCall` for a recursive call,
+`fnCall` for a call of a local function); and the two compound statements occur only in tail
+position: `ite` (case) and `fix`, which is a `letrec f := fix … in rest` whose scope is the rest
+of the computation. Loops and folds are `fix` nodes too, so they are also in tail position. A
+Lean `if`/`match` with a call in non-tail position is captured by duplicating the rest of the
+computation into both branches, and a call of a recursive function or a loop in non-tail
+position becomes `fix g := … in let v := g args in k`.
 
-In either case the soundness argument stays the same. The agreement proof (`wf_agree`) only
-relies on the uniqueness of the `fix` solution (`fixFn_unique`) and on `f.eq_def`. The well-founded
-relation and the decreasing proofs are still the ones Lean built.
+## 1. Capture-only gaps (the grammar could already express them): all closed
 
-## 0. Fixed in this session (they were bugs, not design limits)
+| example (`Tests/GapFunctions.lean`) | shape | how it is captured |
+|---|---|---|
+| `callInInnerIf` | `1 + (if c then f a else f b)` | the continuation is duplicated into both branches of the `ite` |
+| `callInAnd` | `!(c && f n)` in non-tail position | `a && b` becomes `if a then b else false` (`\|\|` likewise), then as above |
+| `boolMatch` | `match b with \| true => … \| false => …` | `Bool.casesOn` is the test `b`, branches swapped |
+| `litPatterns` | `\| 1 => … \| 5 => … \| n+2 => …` | the casts (`▸`) of the unfolded matcher are erased; each literal is an `n = k` test |
+| `matchEq` | `match h : n % 3 with …` | the matcher is beta-reduced, the `Eq.ndrec` erased |
 
-| example | before | cause | fix |
-|---|---|---|---|
-| `fixedMid (n k)`, `fixedMid3 (n k acc)`: a fixed parameter that is not the first one | capture failed with a spurious "failed to prove termination" | Lean 4.28 moves fixed parameters in front of the `WellFounded.fix` even when they are not a prefix, but the capture assumed they were the first ones | the capture now reads which parameters are packed into the fixpoint argument. For a non-prefix layout it uses the new relation `WFLang.fixedAtRel` and its well-foundedness proof `fixedAtRel_wf` (`Core/Types.lean`) |
-| `whereHelper` (non-recursive, calls its recursive `where go`) | capture fine, but `wf_agree` failed | `go` is named `whereHelper.go`, and the "auxiliary definition of `fn`" test was a plain prefix test, so the function was taken to be recursive itself | only internal auxiliaries (`fn._unary`, …) are followed now |
-| `haveProof`: `if h : n = 0 … else have : n/2 < n := … h …; f (n/2)` | rejected | the `dite` branch mentions `h`, but only inside the `have`'s proof | `let`/`have` are inlined before the "does the branch use `h`?" check |
+## 2. Operators: all closed
 
-All of these now have agreement theorems and runtime checks in `Tests/Gaps.lean`.
+* **By translation alone**: `Nat.pred n` ↦ `n - 1`, `a != b` / `bne` ↦ `!(a == b)`, `min`/`max`
+  ↦ `if a ≤ b then … else …`, `a ∣ b` ↦ `b % a == 0` (`usesLibFns`, `usesBne`, `usesMin`,
+  `usesDvd`).
+* **New operators** (`BinOp`/`UnOp` in `Core/Types.lean`): `^`, `<<<`, `>>>`, `&&&`, `|||`, `^^^`,
+  `xor` on `Bool`, `Nat.gcd`, `Nat.lcm`, `Nat.log2` (`usesPow`, `usesShift`, `usesXor`,
+  `usesLibFns`).
 
-## 1. Capture-only gaps: `PCL` can express them, the elaborator must learn the shape
+## 3. Other types: all closed
 
-| example | error today | how to support it | effort |
-|---|---|---|---|
-| `callInInnerIf`: `1 + (if c then f a else f b)`, a call inside a branch of a **non-tail** `if`/`match` | recursive call in an unsupported position | in `lift`, when a control node contains a call, emit `Expr.ite` and put the continuation `k` into both branches (or bind the `if` result in a small join `fix`). The path conditions then give the decrease proofs exactly as for tail `if`s | small |
-| `callInAnd`: `!(c && f n)` in non-tail position | same | desugar `a && b` to `if a then b else false` (and `a \|\| b` likewise), then use the item above. Tail `&&`/`\|\|` already work this way | small |
-| `boolMatch`: `match b with \| true => … \| false => …` | same | the matcher unfolds to `Bool.casesOn b (false-branch) (true-branch)`. Recognise it in `branch?` as the test `.bool b`, with the branches swapped | small |
-| `litPatterns`: patterns `\| 1 => … \| 5 => … \| n+2 => …` | same | the matcher unfolds to `Nat.casesOn x … (Nat.casesOn n … (if h : n = 3 then h ▸ … else …))`. The `dite` branch uses `h` only in a cast (`▸`) of the motive. Erase that cast, since the motive is constant here, and then it is an ordinary `n = 3` test | small–medium |
-| `matchEq`: `match h : n % 3 with …` | same | the matcher unfolds to `(fun x₁ => if h : x₁ = 0 then Eq.ndrec … else …) (n % 3) rfl`, i.e. a `dite` plus an `Eq.ndrec` that transports the named equation. Beta-reduce, then erase the `Eq.ndrec` as above | small–medium |
-
-(Checked by printing the unfolded matchers of these three functions.)
-
-## 2. Operators missing from the grammar
-
-Some can be handled **by translation alone**, with no grammar change:
-
-| Lean | translation |
+| example | what was added |
 |---|---|
-| `Nat.pred n` (`usesLibFns`) | `n - 1` |
-| `a != b`, `bne` (`usesBne`) | `!(a == b)` |
-| `xor a b` on `Bool` (`usesXor`) | `!(a == b)` |
-| `min a b` / `max a b` (`usesMin`) | `if a ≤ b then a else b` / `if a ≤ b then b else a` (`PExpr.ite`) |
-| `a ∣ b` as a condition (`usesDvd`) | `b % a == 0` (true also for `a = 0` since `b % 0 = b`) |
-
-Others need **new `BinOp` constructors**: an evaluation clause, one line in `natBin?`, and a
-`simp` lemma for `wf_agree`.
-
-* `a ^ b` (`usesPow`), and `>>>`, `<<<` (`usesShift`), `&&&`, `|||`, `^^^`.
-* Library functions such as `Nat.gcd` (`usesLibFns`), `Nat.log2`, `Nat.sqrt`. You can add each
-  one as an operator. The general route is to treat recursive library functions as callees, the
-  way user functions are handled already (a nested `fix` built from their `eq_def` and Lean's
-  well-founded relation). Right now library constants are deliberately never inlined or captured.
-
-## 3. Types other than `Nat` and `Bool` (grammar extension)
-
-| example | what is needed |
-|---|---|
-| `intDown : Int → Int` | a `Ty.int` with its operators and comparisons. Lean's relation (`termination_by n.toNat`) is reused unchanged |
-| `fibPair : Nat → Nat × Nat` | a product type `Ty.prod s t` with a pair constructor and projections in `PExpr`. This also allows returning several results, e.g. the state of a loop |
-| `listSum : List Nat → Nat` | `Ty.list t` with `nil`, `cons`, and a `match` on lists turned into a branch (`isNil`, `head`, `tail`). The relation is Lean's `sizeOf`-based one, pulled back as now |
-| `boundedRes : Nat → {r // r ≤ n}` | the case where a termination proof needs a *property of a recursive result*. A plain `.val` is easy, but using `r.2` in a decrease proof needs a `fix` that carries a postcondition `post : Env params → ret → Prop`, proved at every `ret` and assumed for each `fixSelfCall` result in its continuation's path condition. That is a real extension of the grammar and of the evaluator's typing. Soundness still follows from `WellFounded.fix` |
+| `intDown`, `intSteps` | `Ty.int`, with `+ - * / %`, `<`, `≤`, negation, `Int.toNat`, `Int.natAbs`, the cast `Nat → Int`; Lean's relation (`termination_by n.toNat`) is reused |
+| `fibPair`, `swapSteps` | `Ty.prod s t`, pairing, projections, `match` on pairs; pairs as parameters and results |
+| `listSum`, `listRev`, `listPairs`, `listHalve` | `Ty.list t`, `[]`, `::`, `++`, `head`, `tail`, `isNil`, `length`; `match` on lists (also nested patterns) becomes `isNil` tests; structural recursion on lists uses the length |
+| `boundedRes`, `nestedBound` | **postconditions**: a subtype result `{r // Q r}` becomes the postcondition `Q` of the `fix` node. Each `ret` proves it, and after each recursive call it is added to the path condition, so a decrease proof may use it (`nestedBound`'s second call needs `r ≤ n - 1` from the first). `PTerm.run_post`: every run satisfies it |
 
 ## 4. Higher-order code
 
-| example | how it could be supported |
+| example | status | how |
+|---|---|---|
+| `forRange`: `for i in [0:n] do s := s + i` | captured | the `for` loop (in `Id`, over a range, always continuing) is rewritten into `WFLang.rangeLoop` (`Core/Loops.lean`), a first-order well-founded function whose function parameter is then *specialised* to the loop body: a nested `fix` with measure `stop - i` |
+| `usesFold`: `Nat.fold n (fun i _ acc => …) init` | captured | rewritten into `rangeLoop` in the same way |
+| `Tco.iter`, `Tco.hyperLoop` (function parameters) | captured when specialised | `#lean_wf_func_to_term (Tco.iter Tco.mc91)` captures the copy specialised to a closed function argument; a call with a function argument inside another function is specialised at the call site, the free variables of the argument becoming extra (fixed) parameters (`useIter`: `Tco.iter (fun x => x + k) n 0`) |
+| `Tco.hyperWhile` (a `for` loop whose body calls `hyperWhile`), `Tco.hyperTCO` (`hyperLoop (hyperTCO n a) …`), `Tco.ack2` (`ackInner (ack2 m)`, a function result), `loopRec`, `foldRec`, `viaApplyN` | captured | **recursion through a function argument**, see below |
+| `useHyperWhile`, `sumHyperTCO` | captured | functions calling the above: their node is called with tag `0` (and padding) |
+| `underLambda`: a call under `fun` in `List.map` over `List.attach` | **rejected** | see §6 |
+
+**Recursion through a function argument.** When `f` calls a recursive function `g` with a
+function argument that calls `f` again, `f` and the copy of `g` specialised to that argument are
+captured as **one** local recursive function. Its parameters are
+`tag :: f's parameters ++ g's lifted variables ++ g's parameters` (the part not used by a call
+is padded with default values); `tag = 0` runs `f`'s body and `tag = 1` runs `g`'s. Its relation
+is `WFLang.hoRel` (`Core/Types.lean`, proved well-founded by `hoRel_wf`, no axioms), built from
+Lean's relations `Rf` of `f` and `Rg` of `g`, and a predicate `Call x k`, read off the function
+argument: "the function argument, at the lifted variables `k`, may call `f x`":
+
+* `f x' < f x` if `Rf x' x`;
+* `g y < f x` (entering `g`) if every call `f x'` that the function argument may make is
+  `Rf`-below `x`. This is where the path condition of `f` is used: e.g. for `hyperWhile` it is
+  `∀ r, (n - 1, a, r)` is below `(n, a, b)`, true because the `match` gave `n ≠ 0`;
+* `g y' < g y` if they have the same lifted variables and `Rg y' y`;
+* `f x' < g y` if the function argument of `g y` may call `f x'` (true at every call, by
+  construction).
+
+The agreement proof shows that the node computes
+`F (t, xs, ys, zs) = if t = 0 then f xs else g (spec ys) zs`, by unfolding `f` or `g` once.
+
+## 5. Other recursion schemes: closed
+
+| example | how |
 |---|---|
-| `forRange`: `for i in [0:n] do s := s + i` | unlike `while`, a range `for` terminates. Desugar it into a nested `fix` over `(i, state…)` with measure `n - i`. With several mutable variables this needs products (§3) or one parameter per variable |
-| `usesFold`: `Nat.fold n (fun i _ acc => …) init` | same technique: when the lambda argument is known, specialise the combinator to a nested `fix` |
-| `underLambda`: recursive call under `fun` in `List.map` over `attach` | needs lists (§3) plus `map`/`sum`, or lambda lifting into a nested `fix` that iterates over the list |
-| uploaded `Tco.iter`, `Tco.hyperLoop`, `Tco.ack2` (function-valued parameters; rejected in `Tests/Sources.lean`) | *specialisation / defunctionalisation*: when every call site passes a known function, e.g. `iter mc91`, capture a copy of `iter` with that function inlined. Fully general function-valued parameters would need function types in `Ty` (a higher-order `PCL`) |
+| mutual recursion: `More.Mutual.isEven`/`isOdd` (structural), `downA`/`downB` (well-founded, `termination_by`), `mod3a`/`mod3b`/`mod3c` (three functions) | one `fix` with a tag parameter selecting the member; a call of the `i`-th member is a recursive call with tag `i`; the relation is Lean's relation for the group (on the `PSum` domain of `f._mutual`), pulled back along `(i, xs) ↦ PSum.inl/inr xs` (for structural groups: the common recursive parameter decreases) |
+| a proof precondition: `Tco.boom (n) (h : Safe n)` | a `fix` carries a precondition `pre`, which is part of the path condition of its body; every call proves it for its arguments. The program is a `PTerm` with precondition `Safe n`, run as `PTerm.run boom_term (n, ()) h` |
 
-## 5. Other recursion schemes
+## 6. Still not supported
 
-| example | how it could be supported |
-|---|---|
-| mutual recursion (`More.Mutual.isEven`/`isOdd`, rejected in `Tests/MoreChecks.lean`) | Lean defines the pair as one `WellFounded.fix` on a `PSum` domain. Encode it as a single `fix` with an extra tag parameter selecting the function, with Lean's relation pulled back along `tag, args ↦ PSum.inl/inr args`. Alternatively add a `mutual fix` node with an index. If the functions have different signatures, this needs products or padding |
-| functions with a proof precondition, e.g. uploaded `Tco.boom (n) (h : Safe n)` | let a `Term` carry a precondition `pre` as the path condition of the top-level `fix` body, instead of `True`. `Term.eval` then takes a proof of `pre x`, and the decrease proofs may use it |
-
-## 6. Not supportable: these are not well-founded definitions
-
-* `while` loops (`Tco.ackWhile`, `Tco.diagonalWhile`, `Tco.mc91While`, `isqrt`, …), `partial def`,
-  `partial_fixpoint`. Lean builds them without any termination proof (`Lean.Loop.forIn` / opaque
-  implementations), so there is no relation or decreasing proof to reuse. They can only be
-  captured after being rewritten as well-founded recursion, as was done for `hyperWhile` in
-  `Tests/SourceProofs.lean`.
+* **Calls under a binder in library code**, e.g. `underLambda`:
+  `((List.range n).attach.map fun ⟨i, _⟩ => underLambda i).sum`. `List.map`, `List.range`,
+  `List.sum` are library functions, which are never inlined or specialised, and the termination
+  proof needs the membership `i ∈ List.range n` carried by `attach`. Supporting it would need
+  first-order replacements for these combinators (like `rangeLoop` for `for`) whose function
+  argument receives the membership proof, and a precondition on the list being traversed.
+* **Function-valued parameters without a known argument**, e.g. `#lean_wf_func_to_term Tco.iter`
+  on its own: the program would need function types in `Ty`. Capture a specialised copy instead.
+* **Mutually recursive functions with different parameter or result types**: the members of a
+  group must have the same signature (the tag encoding shares the parameters). Padding, as for
+  recursion through a function argument, would lift this for the parameters.
+* Restrictions of recursion through a function argument: one specialised function per captured
+  function (a second, different loop whose body calls `f` is rejected); `f` and `g` must have
+  the same result type; no proof parameters or subtype result; the calls of `f` inside the
+  function argument may not be under a further binder.
+* **Not well-founded definitions**: `while` loops (`Tco.ackWhile`, `Tco.diagonalWhile`,
+  `Tco.mc91While`, `isqrt`, …), `partial def`, `partial_fixpoint`. Lean builds them without any
+  termination proof (`Lean.Loop.forIn` / opaque implementations), so there is no relation or
+  decreasing proof to reuse. They can only be captured after being rewritten as well-founded
+  recursion or as a bounded `for` loop.
