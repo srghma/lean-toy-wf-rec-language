@@ -1,4 +1,4 @@
-import RequestProject.WFLang.Capture.Meta
+import RequestProject.WFLang.Capture.Optimize
 import RequestProject.WFLang.Core.PExpr
 
 /-!
@@ -29,30 +29,14 @@ register_option wfLang.joinPoints : Bool := {
 /-- Surface syntax of a term. -/
 abbrev Stx := TSyntax `term
 
-/-- An object type (a `WFLang.Ty` expression) as syntax. -/
-partial def tyExprStx (t : Lean.Expr) : MetaM Stx := do
-  if t.isConstOf ``WFLang.Ty.nat then return ← `(WFLang.Ty.nat)
-  if t.isConstOf ``WFLang.Ty.bool then return ← `(WFLang.Ty.bool)
-  if t.isConstOf ``WFLang.Ty.int then return ← `(WFLang.Ty.int)
-  if t.isAppOfArity ``WFLang.Ty.prod 2 then
-    return ← `(WFLang.Ty.prod $(← tyExprStx (t.getArg! 0)) $(← tyExprStx (t.getArg! 1)))
-  if t.isAppOfArity ``WFLang.Ty.list 1 then
-    return ← `(WFLang.Ty.list $(← tyExprStx (t.getArg! 0)))
-  throwError "#lean_wf_func_to_term: unexpected object type {t}"
-
 /-- The object type of a Lean type, as syntax. -/
-def tyStx (t : Lean.Expr) : MetaM Stx := do tyExprStx (← tyOf t)
+def tyStx (t : Lean.Expr) : MetaM Stx := do PE.tyExprStx (← tyOf t)
 
 /-- The object type of the elements of a Lean list type, as syntax. -/
 def elemTyStx (listTy : Lean.Expr) : MetaM Stx := do
   let t ← whnfR listTy
   unless t.isAppOfArity ``List 1 do throwError "#lean_wf_func_to_term: not a list type {t}"
   tyStx (t.getArg! 0)
-
-/-- de Bruijn variable for position `i`. -/
-def varStx : Nat → MetaM Stx
-  | 0 => `(WFLang.Var.here)
-  | i + 1 => do `(WFLang.Var.there $(← varStx i))
 
 /-- Capture of a function `f` whose body calls a function `g` with a function argument that
 calls `f` again (e.g. a `for` loop whose body calls `f`): `f` and the copy of `g` specialised to
@@ -108,6 +92,9 @@ structure Ctx where
   /-- The join points in scope, innermost first: for each, the number of variables in scope at
   its definition.  Empty in the body of each local recursive function. -/
   joins : List Nat := []
+  /-- The global functions visible here, in the order of the global context (each with its
+  signature): a call of `globals[j]` is `Expr.gCall` with the index of `globals[j]`. -/
+  globals : Array (Name × FnSig) := #[]
 
 /-- A `Ctx` over the parameters `xs` of the captured function (its object parameters: the
 proof parameters are not variables of the object language). -/
@@ -125,20 +112,10 @@ def Ctx.ofParams (fn : Name) (xs : Array Lean.Expr) (sig? : Option FnSig := none
 def objArgs (sig : FnSig) (args : Array Lean.Expr) : List Lean.Expr :=
   sig.objPos.map (args[·]!)
 
-def natLit (n : Nat) : MetaM Stx :=
-  `(WFLang.PExpr.lit WFLang.Ty.nat $(quote n))
-
-def binStx (op : Stx) (a b : Stx) : MetaM Stx :=
-  `(WFLang.PExpr.bin $op $a $b)
-
-/-- `t == 0` -/
-def isZeroStx (t : Stx) : MetaM Stx := do
-  binStx (← `(WFLang.BinOp.beq WFLang.Ty.nat)) t (← natLit 0)
-
 /-- Does `e` call the function being captured, or one of the recursive callees? -/
 def hasCall (c : Ctx) (e : Lean.Expr) : Bool :=
   (e.find? fun x => x.isAppOf c.fn || c.callees.any (x.isAppOf ·.1) ||
-    c.specFns.any (x.isAppOf ·) || c.group.any (x.isAppOf ·) ||
+    c.specFns.any (x.isAppOf ·) || c.group.any (x.isAppOf ·) || c.globals.any (x.isAppOf ·.1) ||
     c.ho.any (fun h => x.isAppOf h.fName || x.isAppOf h.gRef.name)).isSome
 
 /-- If `e` is a call of a recursive function with function arguments: the reference to the copy
@@ -171,6 +148,22 @@ def calleeCall? (c : Ctx) (e : Lean.Expr) : Option (FnSig × Stx) :=
   | .const g _ => (c.callees.find? fun (g', sig, _) => g' == g && e.getAppNumArgs == sig.arity).map
       (·.2)
   | _ => none
+
+/-- If `e` is a (full) call of one of the global functions visible here: its position in the
+global context and its signature. -/
+def globalCall? (c : Ctx) (e : Lean.Expr) : Option (Nat × FnSig) :=
+  match e.getAppFn with
+  | .const g _ => (c.globals.findIdx? fun (g', sig) => g' == g && e.getAppNumArgs == sig.arity).map
+      fun j => (j, c.globals[j]!.2)
+  | _ => none
+
+/-- The index (`PCL.FnVar` in the global context) of the global function at position `j`: the
+global context lists the functions innermost (last defined) first. -/
+def gvarStx (c : Ctx) (j : Nat) : MetaM Stx := do
+  let mut v : Stx := mkIdent `WFLang.PCL.FnVar.here
+  for _ in [0:c.globals.size - 1 - j] do
+    v ← `($(mkIdent `WFLang.PCL.FnVar.there) $v)
+  return v
 
 /-- A placeholder for an erased proof of `p`.  It only occurs in proof positions, which the
 translation ignores (the capture writes its own proofs); if it ever reached a translated
@@ -338,156 +331,188 @@ def branch? (e : Lean.Expr) (shortCircuit := true) :
     return some (.bool (e.getArg! 0), mkConst ``Bool.true, e.getArg! 1)
   return none
 
+/-- A binary operator of the grammar. -/
+def bop (n : Name) : MetaM BOp := return { name := n, stx := mkIdent n }
+
+/-- A binary operator of the grammar with type arguments (`beq t`, `pair s t`, `cons t`,
+`append t`). -/
+def bopT (n : Name) (tys : Array Stx) : MetaM BOp :=
+  return { name := n, stx := ← `($(mkIdent n) $tys*) }
+
+/-- A unary operator of the grammar, with its type arguments. -/
+def uop (n : Name) (tys : Array Stx := #[]) : MetaM UOp :=
+  return { name := n, stx := ← if tys.isEmpty then pure (mkIdent n : Stx) else `($(mkIdent n) $tys*) }
+
 mutual
-/-- A call-free Lean expression as a `PExpr`. -/
-partial def pexpr (c : Ctx) (e : Lean.Expr) : MetaM Stx := do
+/-- A call-free Lean expression as a (simplified) `PE`: every operator is built by the smart
+constructors of `Capture/Optimize.lean`, so the result is in optimised normal form. -/
+partial def pexprE (c : Ctx) (e : Lean.Expr) : MetaM PE := do
   let e := (← instantiateMVars e).consumeMData.headBeta
   if e.isFVar then
     if let some i := c.vars.findIdx? (· == e.fvarId!) then
-      return ← `(WFLang.PExpr.var $(← varStx i))
+      return .var i
   -- `Int` literals
   if (e.isAppOfArity ``OfNat.ofNat 3 || e.isAppOfArity ``Neg.neg 3) &&
       (e.getArg! 0).isConstOf ``Int then
-    if let some i := e.int? then
-      let lit ← `(WFLang.PExpr.lit WFLang.Ty.int ($(quote i.natAbs) : Int))
-      return ← if i < 0 then `(WFLang.PExpr.un WFLang.UnOp.ineg $lit) else pure lit
-  if let some n := e.nat? then return ← natLit n
-  if let some n := e.rawNatLit? then return ← natLit n
-  if e.isConstOf ``Nat.zero then return ← natLit 0
-  if e.isConstOf ``Bool.true then return ← `(WFLang.PExpr.lit WFLang.Ty.bool true)
-  if e.isConstOf ``Bool.false then return ← `(WFLang.PExpr.lit WFLang.Ty.bool false)
+    if let some i := e.int? then return .lit (.int i)
+  if let some n := e.nat? then return PE.natLit n
+  if let some n := e.rawNatLit? then return PE.natLit n
+  if e.isConstOf ``Nat.zero then return PE.natLit 0
+  if e.isConstOf ``Bool.true then return PE.boolLit true
+  if e.isConstOf ``Bool.false then return PE.boolLit false
   if e.isAppOfArity ``Nat.succ 1 then
-    return ← binStx (← `(WFLang.BinOp.add)) (← pexpr c (e.getArg! 0)) (← natLit 1)
-  if let some e' ← unfoldStep? e then return ← pexpr c e'
+    return PE.mkBin (← bop ``WFLang.BinOp.add) (← pexprE c (e.getArg! 0)) (PE.natLit 1)
+  if let some e' ← unfoldStep? e then return ← pexprE c e'
   if let some (t, a, b) ← branch? e (shortCircuit := false) then
-    return ← `(WFLang.PExpr.ite $(← test c t) $(← pexpr c a) $(← pexpr c b))
+    return PE.mkIte (← testE c t) (← pexprE c a) (← pexprE c b)
   if let some (op, a, b) := natBin? e then
-    return ← binStx (mkIdent op) (← pexpr c a) (← pexpr c b)
+    return PE.mkBin (← bop op) (← pexprE c a) (← pexprE c b)
   if let some (op, a, b) := intBin? e then
-    return ← binStx (mkIdent op) (← pexpr c a) (← pexpr c b)
+    return PE.mkBin (← bop op) (← pexprE c a) (← pexprE c b)
   -- subtypes: a value is represented by its carrier value, the property is dropped
-  if e.isAppOfArity ``Subtype.val 3 then return ← pexpr c (e.getArg! 2)
-  if e.isAppOfArity ``Subtype.mk 4 then return ← pexpr c (e.getArg! 2)
+  if e.isAppOfArity ``Subtype.val 3 then return ← pexprE c (e.getArg! 2)
+  if e.isAppOfArity ``Subtype.mk 4 then return ← pexprE c (e.getArg! 2)
   -- `Int` operators and conversions
   if e.isAppOfArity ``Neg.neg 3 && (e.getArg! 0).isConstOf ``Int then
-    return ← `(WFLang.PExpr.un WFLang.UnOp.ineg $(← pexpr c (e.getArg! 2)))
+    return PE.mkUn (← uop ``WFLang.UnOp.ineg) (← pexprE c (e.getArg! 2))
   if (e.isAppOfArity ``Nat.cast 3 && (e.getArg! 0).isConstOf ``Int) ||
       (e.isAppOfArity ``NatCast.natCast 3 && (e.getArg! 0).isConstOf ``Int) then
-    return ← `(WFLang.PExpr.un WFLang.UnOp.ofNat $(← pexpr c (e.getArg! 2)))
+    return PE.mkUn (← uop ``WFLang.UnOp.ofNat) (← pexprE c (e.getArg! 2))
   if e.isAppOfArity ``Int.ofNat 1 then
-    return ← `(WFLang.PExpr.un WFLang.UnOp.ofNat $(← pexpr c (e.getArg! 0)))
+    return PE.mkUn (← uop ``WFLang.UnOp.ofNat) (← pexprE c (e.getArg! 0))
   if e.isAppOfArity ``Int.toNat 1 then
-    return ← `(WFLang.PExpr.un WFLang.UnOp.toNat $(← pexpr c (e.getArg! 0)))
+    return PE.mkUn (← uop ``WFLang.UnOp.toNat) (← pexprE c (e.getArg! 0))
   if e.isAppOfArity ``Int.natAbs 1 then
-    return ← `(WFLang.PExpr.un WFLang.UnOp.natAbs $(← pexpr c (e.getArg! 0)))
+    return PE.mkUn (← uop ``WFLang.UnOp.natAbs) (← pexprE c (e.getArg! 0))
   -- pairs
   if e.isAppOfArity ``Prod.mk 4 then
-    return ← binStx (← `(WFLang.BinOp.pair $(← tyStx (e.getArg! 0)) $(← tyStx (e.getArg! 1))))
-      (← pexpr c (e.getArg! 2)) (← pexpr c (e.getArg! 3))
+    return PE.mkBin (← bopT ``WFLang.BinOp.pair #[← tyStx (e.getArg! 0), ← tyStx (e.getArg! 1)])
+      (← pexprE c (e.getArg! 2)) (← pexprE c (e.getArg! 3))
   if e.isAppOfArity ``Prod.fst 3 then
-    return ← `(WFLang.PExpr.un (WFLang.UnOp.fst $(← tyStx (e.getArg! 0))
-      $(← tyStx (e.getArg! 1))) $(← pexpr c (e.getArg! 2)))
+    return PE.mkUn (← uop ``WFLang.UnOp.fst #[← tyStx (e.getArg! 0), ← tyStx (e.getArg! 1)])
+      (← pexprE c (e.getArg! 2))
   if e.isAppOfArity ``Prod.snd 3 then
-    return ← `(WFLang.PExpr.un (WFLang.UnOp.snd $(← tyStx (e.getArg! 0))
-      $(← tyStx (e.getArg! 1))) $(← pexpr c (e.getArg! 2)))
+    return PE.mkUn (← uop ``WFLang.UnOp.snd #[← tyStx (e.getArg! 0), ← tyStx (e.getArg! 1)])
+      (← pexprE c (e.getArg! 2))
   -- lists
   if e.isAppOfArity ``List.nil 1 then
-    return ← `(WFLang.PExpr.lit (WFLang.Ty.list $(← tyStx (e.getArg! 0))) [])
+    return .lit (.list (← tyOf (e.getArg! 0)) [])
   if e.isAppOfArity ``List.cons 3 then
-    return ← binStx (← `(WFLang.BinOp.cons $(← tyStx (e.getArg! 0))))
-      (← pexpr c (e.getArg! 1)) (← pexpr c (e.getArg! 2))
+    return PE.mkBin (← bopT ``WFLang.BinOp.cons #[← tyStx (e.getArg! 0)])
+      (← pexprE c (e.getArg! 1)) (← pexprE c (e.getArg! 2))
   if e.isAppOfArity ``HAppend.hAppend 6 && (← whnfR (e.getArg! 0)).isAppOfArity ``List 1 then
-    return ← binStx (← `(WFLang.BinOp.append $(← elemTyStx (e.getArg! 0))))
-      (← pexpr c (e.getArg! 4)) (← pexpr c (e.getArg! 5))
+    return PE.mkBin (← bopT ``WFLang.BinOp.append #[← elemTyStx (e.getArg! 0)])
+      (← pexprE c (e.getArg! 4)) (← pexprE c (e.getArg! 5))
   if e.isAppOfArity ``List.length 2 then
-    return ← `(WFLang.PExpr.un (WFLang.UnOp.length $(← tyStx (e.getArg! 0)))
-      $(← pexpr c (e.getArg! 1)))
+    return PE.mkUn (← uop ``WFLang.UnOp.length #[← tyStx (e.getArg! 0)]) (← pexprE c (e.getArg! 1))
   if e.isAppOfArity ``List.isEmpty 2 then
-    return ← `(WFLang.PExpr.un (WFLang.UnOp.isNil $(← tyStx (e.getArg! 0)))
-      $(← pexpr c (e.getArg! 1)))
+    return PE.mkUn (← uop ``WFLang.UnOp.isNil #[← tyStx (e.getArg! 0)]) (← pexprE c (e.getArg! 1))
   if e.isAppOfArity ``List.tail 2 then
-    return ← `(WFLang.PExpr.un (WFLang.UnOp.tail $(← tyStx (e.getArg! 0)))
-      $(← pexpr c (e.getArg! 1)))
+    return PE.mkUn (← uop ``WFLang.UnOp.tail #[← tyStx (e.getArg! 0)]) (← pexprE c (e.getArg! 1))
   if e.isAppOfArity ``List.headD 3 then
     let t ← tyStx (e.getArg! 0)
-    let l ← pexpr c (e.getArg! 1)
-    let hd ← `(WFLang.PExpr.un (WFLang.UnOp.head $t) $l)
+    let l ← pexprE c (e.getArg! 1)
+    let hd := PE.mkUn (← uop ``WFLang.UnOp.head #[t]) l
     if (e.getArg! 2).isAppOfArity ``WFLang.Ty.default 1 then return hd
-    return ← `(WFLang.PExpr.ite (WFLang.PExpr.un (WFLang.UnOp.isNil $t) $l)
-      $(← pexpr c (e.getArg! 2)) $hd)
+    return PE.mkIte (PE.mkUn (← uop ``WFLang.UnOp.isNil #[t]) l) (← pexprE c (e.getArg! 2)) hd
   if e.isAppOfArity ``BEq.beq 4 then
-    return ← binStx (← `(WFLang.BinOp.beq $(← tyStx (e.getArg! 0))))
-      (← pexpr c (e.getArg! 2)) (← pexpr c (e.getArg! 3))
-  if e.isAppOfArity ``Decidable.decide 2 then return ← pprop c (e.getArg! 0)
+    return PE.mkBin (← bopT ``WFLang.BinOp.beq #[← tyStx (e.getArg! 0)])
+      (← pexprE c (e.getArg! 2)) (← pexprE c (e.getArg! 3))
+  if e.isAppOfArity ``Decidable.decide 2 then return ← ppropE c (e.getArg! 0)
   if e.isAppOfArity ``and 2 then
-    return ← binStx (← `(WFLang.BinOp.and)) (← pexpr c (e.getArg! 0)) (← pexpr c (e.getArg! 1))
+    return PE.mkBin (← bop ``WFLang.BinOp.and) (← pexprE c (e.getArg! 0)) (← pexprE c (e.getArg! 1))
   if e.isAppOfArity ``or 2 then
-    return ← binStx (← `(WFLang.BinOp.or)) (← pexpr c (e.getArg! 0)) (← pexpr c (e.getArg! 1))
-  if e.isAppOfArity ``not 1 then return ← `(WFLang.PExpr.not $(← pexpr c (e.getArg! 0)))
+    return PE.mkBin (← bop ``WFLang.BinOp.or) (← pexprE c (e.getArg! 0)) (← pexprE c (e.getArg! 1))
+  if e.isAppOfArity ``not 1 then return PE.mkNot (← pexprE c (e.getArg! 0))
   -- operators translated into the existing ones
   if e.isAppOfArity ``bne 4 then
-    return ← `(WFLang.PExpr.not $(← binStx (← `(WFLang.BinOp.beq $(← tyStx (e.getArg! 0))))
-      (← pexpr c (e.getArg! 2)) (← pexpr c (e.getArg! 3))))
+    return PE.mkNot (PE.mkBin (← bopT ``WFLang.BinOp.beq #[← tyStx (e.getArg! 0)])
+      (← pexprE c (e.getArg! 2)) (← pexprE c (e.getArg! 3)))
   if e.isAppOfArity ``Nat.pred 1 then
-    return ← binStx (← `(WFLang.BinOp.sub)) (← pexpr c (e.getArg! 0)) (← natLit 1)
+    return PE.mkBin (← bop ``WFLang.BinOp.sub) (← pexprE c (e.getArg! 0)) (PE.natLit 1)
   for (n, isMin) in [(``Min.min, true), (``Max.max, false)] do
     if e.isAppOfArity n 4 && (e.getArg! 0).isConstOf ``Nat then
-      let a ← pexpr c (e.getArg! 2)
-      let b ← pexpr c (e.getArg! 3)
-      let le ← binStx (← `(WFLang.BinOp.le)) a b
-      return ← if isMin then `(WFLang.PExpr.ite $le $a $b) else `(WFLang.PExpr.ite $le $b $a)
+      let a ← pexprE c (e.getArg! 2)
+      let b ← pexprE c (e.getArg! 3)
+      let le := PE.mkBin (← bop ``WFLang.BinOp.le) a b
+      return if isMin then PE.mkIte le a b else PE.mkIte le b a
   -- library functions that are operators of the grammar
   if e.isAppOfArity ``xor 2 || e.isAppOfArity ``Bool.xor 2 then
-    return ← binStx (← `(WFLang.BinOp.bxor)) (← pexpr c (e.getArg! 0)) (← pexpr c (e.getArg! 1))
+    return PE.mkBin (← bop ``WFLang.BinOp.bxor) (← pexprE c (e.getArg! 0)) (← pexprE c (e.getArg! 1))
   if e.isAppOfArity ``Nat.gcd 2 then
-    return ← binStx (← `(WFLang.BinOp.gcd)) (← pexpr c (e.getArg! 0)) (← pexpr c (e.getArg! 1))
+    return PE.mkBin (← bop ``WFLang.BinOp.gcd) (← pexprE c (e.getArg! 0)) (← pexprE c (e.getArg! 1))
   if e.isAppOfArity ``Nat.lcm 2 then
-    return ← binStx (← `(WFLang.BinOp.lcm)) (← pexpr c (e.getArg! 0)) (← pexpr c (e.getArg! 1))
+    return PE.mkBin (← bop ``WFLang.BinOp.lcm) (← pexprE c (e.getArg! 0)) (← pexprE c (e.getArg! 1))
   if e.isAppOfArity ``Nat.log2 1 then
-    return ← `(WFLang.PExpr.un WFLang.UnOp.log2 $(← pexpr c (e.getArg! 0)))
+    return PE.mkUn (← uop ``WFLang.UnOp.log2) (← pexprE c (e.getArg! 0))
   if let .const g _ := e.getAppFn then
     unless (← isLibraryConst g) || g == c.fn do
       throwError "#lean_wf_func_to_term: unsupported call of {g} (only first-order functions on the object types, fully applied, can be called){indentExpr e}"
   throwError "#lean_wf_func_to_term: unsupported expression{indentExpr e}"
 
-/-- A decidable proposition as a boolean expression. -/
-partial def pprop (c : Ctx) (p : Lean.Expr) : MetaM Stx := do
+/-- A decidable proposition as a (simplified) boolean expression. -/
+partial def ppropE (c : Ctx) (p : Lean.Expr) : MetaM PE := do
   let p := (← instantiateMVars p).consumeMData
-  let beq (t a b : Lean.Expr) : MetaM Stx := do
-    binStx (← `(WFLang.BinOp.beq $(← tyStx t))) (← pexpr c a) (← pexpr c b)
-  let not (s : Stx) : MetaM Stx := `(WFLang.PExpr.not $s)
+  let beq (t a b : Lean.Expr) : MetaM PE := do
+    return PE.mkBin (← bopT ``WFLang.BinOp.beq #[← tyStx t]) (← pexprE c a) (← pexprE c b)
   if p.isAppOfArity ``Eq 3 then
-    if (p.getArg! 2).isConstOf ``Bool.true then return ← pexpr c (p.getArg! 1)
+    if (p.getArg! 2).isConstOf ``Bool.true then return ← pexprE c (p.getArg! 1)
     return ← beq (p.getArg! 0) (p.getArg! 1) (p.getArg! 2)
   if p.isAppOfArity ``Ne 3 then
-    return ← not (← beq (p.getArg! 0) (p.getArg! 1) (p.getArg! 2))
-  if p.isAppOfArity ``Not 1 then return ← not (← pprop c (p.getArg! 0))
+    return PE.mkNot (← beq (p.getArg! 0) (p.getArg! 1) (p.getArg! 2))
+  if p.isAppOfArity ``Not 1 then return PE.mkNot (← ppropE c (p.getArg! 0))
   if p.isAppOfArity ``And 2 then
-    return ← binStx (← `(WFLang.BinOp.and)) (← pprop c (p.getArg! 0)) (← pprop c (p.getArg! 1))
+    return PE.mkBin (← bop ``WFLang.BinOp.and) (← ppropE c (p.getArg! 0)) (← ppropE c (p.getArg! 1))
   if p.isAppOfArity ``Or 2 then
-    return ← binStx (← `(WFLang.BinOp.or)) (← pprop c (p.getArg! 0)) (← pprop c (p.getArg! 1))
+    return PE.mkBin (← bop ``WFLang.BinOp.or) (← ppropE c (p.getArg! 0)) (← ppropE c (p.getArg! 1))
   if p.isAppOfArity ``Dvd.dvd 4 && (p.getArg! 0).isConstOf ``Nat then
     -- `a ∣ b` iff `b % a = 0` (also for `a = 0`, since `b % 0 = b`)
-    return ← binStx (← `(WFLang.BinOp.beq WFLang.Ty.nat))
-      (← binStx (← `(WFLang.BinOp.mod)) (← pexpr c (p.getArg! 3)) (← pexpr c (p.getArg! 2)))
-      (← natLit 0)
+    return PE.mkBin (← bopT ``WFLang.BinOp.beq #[← `(WFLang.Ty.nat)])
+      (PE.mkBin (← bop ``WFLang.BinOp.mod) (← pexprE c (p.getArg! 3)) (← pexprE c (p.getArg! 2)))
+      (PE.natLit 0)
   for (n, lt, swap) in [(``LT.lt, true, false), (``LE.le, false, false),
       (``GT.gt, true, true), (``GE.ge, false, true)] do
     for (T, ltOp, leOp) in [(``Nat, ``WFLang.BinOp.lt, ``WFLang.BinOp.le),
         (``Int, ``WFLang.BinOp.ilt, ``WFLang.BinOp.ile)] do
       if p.isAppOfArity n 4 && (p.getArg! 0).isConstOf T then
         let (a, b) := if swap then (p.getArg! 3, p.getArg! 2) else (p.getArg! 2, p.getArg! 3)
-        return ← binStx (mkIdent (if lt then ltOp else leOp)) (← pexpr c a) (← pexpr c b)
+        return PE.mkBin (← bop (if lt then ltOp else leOp)) (← pexprE c a) (← pexprE c b)
   throwError "#lean_wf_func_to_term: unsupported condition{indentExpr p}"
 
-/-- A branch test as a boolean expression. -/
-partial def test (c : Ctx) : Test → MetaM Stx
-  | .prop p => pprop c p
-  | .bool b => pexpr c b
-  | .isZero t => do isZeroStx (← pexpr c t)
+/-- A branch test as a (simplified) boolean expression. -/
+partial def testE (c : Ctx) : Test → MetaM PE
+  | .prop p => ppropE c p
+  | .bool b => pexprE c b
+  | .isZero t => do
+    return PE.mkBin (← bopT ``WFLang.BinOp.beq #[← `(WFLang.Ty.nat)]) (← pexprE c t) (PE.natLit 0)
   | .isNil l => do
-    `(WFLang.PExpr.un (WFLang.UnOp.isNil $(← elemTyStx (← inferType l))) $(← pexpr c l))
+    return PE.mkUn (← uop ``WFLang.UnOp.isNil #[← elemTyStx (← inferType l)]) (← pexprE c l)
 end
+
+/-- A call-free Lean expression as `PExpr` syntax (in optimised normal form). -/
+def pexpr (c : Ctx) (e : Lean.Expr) : MetaM Stx := do (← pexprE c e).render
+
+/-- A branch test as `PExpr` syntax (in optimised normal form). -/
+def test (c : Ctx) (t : Test) : MetaM Stx := do (← testE c t).render
+
+/-- The statement `if t then a else b` in normal form: a test that simplifies to a literal
+keeps only the branch it selects (the other one is not translated at all), and a negated test
+`!c` becomes `if c then b else a`, so that the test of every `Expr.ite` is a condition
+(`PExpr.isCond`). -/
+def iteStx (c : Ctx) (t : Test) (a b : TermElabM Stx) : TermElabM Stx := do
+  match ← testE c t with
+  | .lit (.bool true) => a
+  | .lit (.bool false) => b
+  | .not c' => do
+    let cs ← c'.render
+    let as ← a
+    let bs ← b
+    `($(mkIdent `WFLang.PCL.Expr.ite) $cs (by decide) $bs $as)
+  | cp => do
+    let cs ← cp.render
+    let as ← a
+    let bs ← b
+    `($(mkIdent `WFLang.PCL.Expr.ite) $cs (by decide) $as $bs)
 
 /-- Argument tuple syntax (`PExprs`). -/
 def pargs (c : Ctx) : List Lean.Expr → MetaM Stx

@@ -18,8 +18,8 @@ Each program is produced by `#lean_wf_func_to_term`, and each agreement theorem 
 | `evenS`        | structural recursion, `Bool` result       |
 | `addIter`      | structural, fixed parameter               |
 | `fib`          | structural, two calls, pattern `n + 2`    |
-| `sumDoubles`   | calls a non-recursive function (inlined)  |
-| `gcdSum`       | calls `gcd` (nested `fix`)                |
+| `sumDoubles`   | calls a non-recursive function (global)   |
+| `gcdSum`       | calls `gcd` (global function)             |
 | `lcmGcd`       | non-recursive, calls `gcd`                |
 | `countCoprime` | call of `gcd` in a test                   |
 | `sumFacts`     | calls the structural `fact`               |
@@ -27,6 +27,10 @@ Each program is produced by `#lean_wf_func_to_term`, and each agreement theorem 
 | `twoLoops`     | two loops and calls in a test             |
 | `gcdLoop`      | call of `gcd` inside a recursive body     |
 | `Tco.mc91TR`   | the uploaded function (calls `mc91Loop`)  |
+
+None of these callees is marked `@[inlinable]`, so each of them is a global function of the
+captured program, defined once in its global context and called with `Expr.gCall`
+(`Globals.lean` compares with `@[inlinable]` callees, which are inlined).
 
 The rejections are checked in `MoreChecks.lean` (mutual recursion) and `Sources.lean` (the
 uploaded functions with `while` loops, function arguments or proof arguments).

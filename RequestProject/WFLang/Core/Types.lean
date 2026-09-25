@@ -1,3 +1,5 @@
+import Mathlib.Order.RelClasses
+
 /-!
 # Core of `PCL`: types, environments, variables, operators
 
@@ -216,25 +218,20 @@ def UnOp.eval : {a b : Ty} → UnOp a b → a.denote → b.denote
 
 /-! ## Relations with fixed parameters -/
 
-/-- A relation on `Env (t :: ts)` whose first component is a *fixed parameter*: related
-environments agree on it, and their tails are related by `R a`, where `a` is that fixed value.
-The capture elaborator uses it for functions such as `def f (k : Nat) : Nat → Nat`, where `k`
-is passed unchanged to every recursive call (Lean keeps such parameters outside the
-`WellFounded.fix`). -/
-def fixedRel {t : Ty} {ts : List Ty} (R : t.denote → Env ts → Env ts → Prop) :
-    Env (t :: ts) → Env (t :: ts) → Prop :=
-  fun x y => x.1 = y.1 ∧ R y.1 x.2 y.2
-
-theorem fixedRel_wf {t : Ty} {ts : List Ty} {R : t.denote → Env ts → Env ts → Prop}
-    (h : ∀ a, WellFounded (R a)) : WellFounded (fixedRel R) := by
-  refine ⟨fun ⟨a, x⟩ => ?_⟩
-  induction x using (h a).induction with
-  | _ x IH =>
-    refine Acc.intro _ fun ⟨b, y⟩ hy => ?_
-    obtain ⟨hb, hr⟩ := hy
-    simp only at hb hr
-    subst hb
-    exact IH y hr
+/-- The relation "same `f`-value `k`, and `g`-values related by `r k`" on any type `α` is
+well-founded if every `r k` is.  It is a subrelation of the inverse image along
+`x ↦ ⟨f x, g x⟩` of the lexicographic order `PSigma.Lex` of the empty relation (on the values of
+`f`) and the `r k` (on the values of `g`), which is well-founded by Mathlib's
+`WellFounded.psigma_lex`. -/
+theorem fibreRel_wf {α K : Sort _} {D : Sort _} {f : α → K} {g : α → D}
+    {r : K → D → D → Prop} (h : ∀ k, WellFounded (r k)) :
+    WellFounded (fun x y => f x = f y ∧ r (f y) (g x) (g y)) :=
+  Subrelation.wf
+    (r := InvImage (PSigma.Lex (β := fun _ => D) emptyRelation r) fun x => ⟨f x, g x⟩)
+    (fun {x y} ⟨hf, hr⟩ => by
+      change PSigma.Lex (β := fun _ => D) emptyRelation r ⟨f x, g x⟩ ⟨f y, g y⟩
+      rw [hf]; exact .right _ hr)
+    (InvImage.wf _ (WellFounded.psigma_lex emptyWf.wf h))
 
 /-- A relation on `Env Γ` whose *fixed parameters* may sit at any positions: `f` reads the
 fixed components, `g` packs the others.  Related environments agree on the fixed components,
@@ -246,17 +243,21 @@ def fixedAtRel {Γ : List Ty} {K : Type} {D : Sort _} (f : Env Γ → K) (g : En
   fun x y => f x = f y ∧ r (f y) (g x) (g y)
 
 theorem fixedAtRel_wf {Γ : List Ty} {K : Type} {D : Sort _} {f : Env Γ → K} {g : Env Γ → D}
-    {r : K → D → D → Prop} (h : ∀ k, WellFounded (r k)) : WellFounded (fixedAtRel f g r) := by
-  refine ⟨fun x => ?_⟩
-  suffices H : ∀ k d, ∀ x, f x = k → g x = d → Acc (fixedAtRel f g r) x from H _ _ x rfl rfl
-  intro k d
-  induction d using (h k).induction with
-  | _ d IH =>
-    intro x hf hg
-    refine Acc.intro _ fun y hy => ?_
-    obtain ⟨hfy, hr⟩ := hy
-    subst hf hg
-    exact IH (g y) hr y hfy rfl
+    {r : K → D → D → Prop} (h : ∀ k, WellFounded (r k)) : WellFounded (fixedAtRel f g r) :=
+  fibreRel_wf h
+
+/-- A relation on `Env (t :: ts)` whose first component is a *fixed parameter*: related
+environments agree on it, and their tails are related by `R a`, where `a` is that fixed value.
+The capture elaborator uses it for functions such as `def f (k : Nat) : Nat → Nat`, where `k`
+is passed unchanged to every recursive call (Lean keeps such parameters outside the
+`WellFounded.fix`). -/
+def fixedRel {t : Ty} {ts : List Ty} (R : t.denote → Env ts → Env ts → Prop) :
+    Env (t :: ts) → Env (t :: ts) → Prop :=
+  fun x y => x.1 = y.1 ∧ R y.1 x.2 y.2
+
+theorem fixedRel_wf {t : Ty} {ts : List Ty} {R : t.denote → Env ts → Env ts → Prop}
+    (h : ∀ a, WellFounded (R a)) : WellFounded (fixedRel R) :=
+  fixedAtRel_wf (f := fun x : Env (t :: ts) => x.1) (g := fun x => x.2) h
 
 /-- A relation on `Env Γ` for a function with a *precondition* `pre` (proof parameters):
 related environments satisfy `pre`, agree on their fixed components (read by `f`), and their
@@ -267,21 +268,16 @@ def preRel {Γ : List Ty} {K : Type} {D : Sort _} (pre : Env Γ → Prop) (f : E
     (g : (x : Env Γ) → pre x → D) (r : K → D → D → Prop) : Env Γ → Env Γ → Prop :=
   fun x y => ∃ (hx : pre x) (hy : pre y), f x = f y ∧ r (f y) (g x hx) (g y hy)
 
+/-- Well-foundedness of `preRel`: on the environments satisfying `pre` (the only ones it
+relates) it is an instance of `fibreRel_wf`. -/
 theorem preRel_wf {Γ : List Ty} {K : Type} {D : Sort _} {pre : Env Γ → Prop} {f : Env Γ → K}
     {g : (x : Env Γ) → pre x → D} {r : K → D → D → Prop} (h : ∀ k, WellFounded (r k)) :
     WellFounded (preRel pre f g r) := by
-  suffices H : ∀ k d, ∀ x (hx : pre x), f x = k → g x hx = d → Acc (preRel pre f g r) x by
-    refine ⟨fun x => Acc.intro _ fun y hy => ?_⟩
-    obtain ⟨hy', _, _, _⟩ := hy
-    exact H _ _ y hy' rfl rfl
-  intro k d
-  induction d using (h k).induction with
-  | _ d IH =>
-    intro x hx hf hg
-    refine Acc.intro _ fun y hy => ?_
-    obtain ⟨hy', hx', hfy, hr⟩ := hy
-    subst hf hg
-    exact IH (g y hy') hr y hy' hfy rfl
+  have hS : ∀ s : Subtype pre, Acc (preRel pre f g r) s.1 := fun s =>
+    (fibreRel_wf (f := fun s : Subtype pre => f s.1) (g := fun s => g s.1 s.2) h).induction
+      (C := fun s => Acc (preRel pre f g r) s.1) s
+      fun s IH => Acc.intro _ fun y ⟨hy, _, hf, hr⟩ => IH ⟨y, hy⟩ ⟨hf, hr⟩
+  exact ⟨fun x => Acc.intro _ fun y ⟨hy, _⟩ => hS ⟨y, hy⟩⟩
 
 /-! ## Relations for recursion through a function argument -/
 

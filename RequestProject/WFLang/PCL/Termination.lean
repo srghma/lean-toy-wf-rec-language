@@ -48,34 +48,40 @@ def JVar.getFirst {params : List Ty} {R : Env params → Env params → Prop}
 
 /-- The arguments of the first recursive call made on input `e` (together with the fact that
 they are `R`-below the current parameters and satisfy the precondition), or `none` if a `ret`
-is reached first.  A `jump` continues with the body of the join point (`jf`). -/
-def Expr.firstCall : {Γ : List Ty} → {G : Env Γ → Prop} → {fns : List Fn} → {sf : Self Γ} →
+is reached first.  A `jump` continues with the body of the join point (`jf`).  Calls of local
+and global functions are complete calls: they are run, and the first recursive call is looked
+for in the rest. -/
+def Expr.firstCall {GL : List Fn} (ge : FEnv GL) : {Γ : List Ty} → {G : Env Γ → Prop} →
+    {fns : List Fn} → {sf : Self Γ} →
     {t : Ty} → {Q : Env Γ → t.denote → Prop} → {js : JScope Γ t} →
-    Expr Γ G fns (some sf) t Q js → (e : Env Γ) → G e → FEnv fns →
+    Expr GL Γ G fns (some sf) t Q js → (e : Env Γ) → G e → FEnv fns →
     JFirst sf.R sf.pre (sf.cur e) js e →
     Option {y : Env sf.params // sf.R y (sf.cur e) ∧ sf.pre y}
-  | _, _, _, _, _, _, _, .ret _ _, _, _, _, _ => none
-  | _, _, _, _, _, _, _, .ite c a b, e, g, fe, jf =>
-      if hc : c.eval e = true then a.firstCall e ⟨g, hc⟩ fe jf
-      else b.firstCall e ⟨g, Bool.eq_false_iff.mpr hc⟩ fe jf
-  | _, _, _, _, _, _, _, .fixSelfCall args dec hpre _, e, g, _, _ =>
+  | _, _, _, _, _, _, _, .ret _ _ _, _, _, _, _ => none
+  | _, _, _, _, _, _, _, .ite c _ a b, e, g, fe, jf =>
+      if hc : c.eval e = true then a.firstCall ge e ⟨g, hc⟩ fe jf
+      else b.firstCall ge e ⟨g, Bool.eq_false_iff.mpr hc⟩ fe jf
+  | _, _, _, _, _, _, _, .fixSelfCall args _ dec hpre _, e, g, _, _ =>
       some ⟨args.eval e, dec e g, hpre e g⟩
-  | _, _, _, _, _, _, _, .fnCall i args hpre k, e, g, fe, jf =>
-      k.firstCall ((i.get fe (args.eval e) (hpre e g)).1, e)
+  | _, _, _, _, _, _, _, .fnCall i args _ hpre k, e, g, fe, jf =>
+      k.firstCall ge ((i.get fe (args.eval e) (hpre e g)).1, e)
         ⟨g, (i.get fe (args.eval e) (hpre e g)).2⟩ fe jf
+  | _, _, _, _, _, _, _, .gCall i args _ hpre k, e, g, fe, jf =>
+      k.firstCall ge ((i.get ge (args.eval e) (hpre e g)).1, e)
+        ⟨g, (i.get ge (args.eval e) (hpre e g)).2⟩ fe jf
   | _, _, _, _, _, _, _, .fix _ _ _ wf _ _ body rest, e, g, fe, jf =>
-      rest.firstCall e g (fixFn wf body fe, fe) jf
+      rest.firstCall ge e g (fixFn ge wf body fe, fe) jf
   | _, _, _, _, _, _, _, .join _ _ body m, e, g, fe, jf =>
-      m.firstCall e g fe ((fun v hv => body.firstCall (v, e) ⟨g, hv⟩ fe jf), jf)
-  | _, _, _, _, _, _, _, .jump i p hpre _, e, g, _, jf =>
+      m.firstCall ge e g fe ((fun v hv => body.firstCall ge (v, e) ⟨g, hv⟩ fe jf), jf)
+  | _, _, _, _, _, _, _, .jump i p _ hpre _, e, g, _, jf =>
       i.getFirst jf (p.eval e) (hpre e g)
 
 /-- The first recursive call always goes down along `R`. -/
-theorem firstCall_dec {params : List Ty} {r : Ty} {R : Env params → Env params → Prop}
+theorem firstCall_dec {GL : List Fn} (ge : FEnv GL) {params : List Ty} {r : Ty} {R : Env params → Env params → Prop}
     {pre : Env params → Prop} {post : Env params → r.denote → Prop} {fns : List Fn}
-    (body : Expr params pre fns (some (Self.top params r R pre post)) r post .nil) (fe : FEnv fns)
+    (body : Expr GL params pre fns (some (Self.top params r R pre post)) r post .nil) (fe : FEnv fns)
     (x : Env params) (hx : pre x) (y : {y : Env params // R y x ∧ pre y})
-    (_ : body.firstCall x hx fe () = some y) :
+    (_ : body.firstCall ge x hx fe () = some y) :
     R y.1 x :=
   y.2.1
 
@@ -83,14 +89,14 @@ theorem firstCall_dec {params : List Ty} {r : Ty} {R : Env params → Env params
 satisfying the precondition and following the first recursive call of each step, one
 reaches in finitely many `R`-steps an argument `z` on which the body returns without calling
 itself. -/
-theorem fix_body_reaches_base {params : List Ty} {r : Ty} {R : Env params → Env params → Prop}
+theorem fix_body_reaches_base {GL : List Fn} (ge : FEnv GL) {params : List Ty} {r : Ty} {R : Env params → Env params → Prop}
     {pre : Env params → Prop} {post : Env params → r.denote → Prop} {fns : List Fn}
-    (wf : WellFounded R) (body : Expr params pre fns (some (Self.top params r R pre post)) r post .nil)
+    (wf : WellFounded R) (body : Expr GL params pre fns (some (Self.top params r R pre post)) r post .nil)
     (fe : FEnv fns) (x : Env params) (hx : pre x) :
-    ∃ z, Relation.ReflTransGen R z x ∧ ∃ hz : pre z, body.firstCall z hz fe () = none := by
+    ∃ z, Relation.ReflTransGen R z x ∧ ∃ hz : pre z, body.firstCall ge z hz fe () = none := by
   induction x using wf.induction with
   | _ x IH =>
-    cases h : body.firstCall x hx fe () with
+    cases h : body.firstCall ge x hx fe () with
     | none => exact ⟨x, .refl, hx, h⟩
     | some y =>
       obtain ⟨z, hz, hbase⟩ := IH y.1 y.2.1 y.2.2
@@ -98,12 +104,12 @@ theorem fix_body_reaches_base {params : List Ty} {r : Ty} {R : Env params → En
 
 /-- In particular, every `fix` body has a base case: an input on which it returns without a
 recursive call (as soon as some input satisfies the precondition). -/
-theorem fix_body_has_base_case {params : List Ty} {r : Ty}
+theorem fix_body_has_base_case {GL : List Fn} (ge : FEnv GL) {params : List Ty} {r : Ty}
     {R : Env params → Env params → Prop} {pre : Env params → Prop}
     {post : Env params → r.denote → Prop} {fns : List Fn} (wf : WellFounded R)
-    (body : Expr params pre fns (some (Self.top params r R pre post)) r post .nil) (fe : FEnv fns)
-    (x : Env params) (hx : pre x) : ∃ z, ∃ hz : pre z, body.firstCall z hz fe () = none :=
-  (fix_body_reaches_base wf body fe x hx).imp fun _ h => h.2
+    (body : Expr GL params pre fns (some (Self.top params r R pre post)) r post .nil) (fe : FEnv fns)
+    (x : Env params) (hx : pre x) : ∃ z, ∃ hz : pre z, body.firstCall ge z hz fe () = none :=
+  (fix_body_reaches_base ge wf body fe x hx).imp fun _ h => h.2
 
 /-- **The looping program cannot be written.**  `fix self x. let v := self x in v` would need
 a decrease proof `dec : ∀ e, R e e`; no well-founded `R` admits one. -/
@@ -113,9 +119,9 @@ theorem loop_unbuildable {params : List Ty} (R : Env params → Env params → P
       (Self.top params .nat R (fun _ => True) (fun _ _ => True)).R
         ((PExprs.ids params).eval e)
         ((Self.top params .nat R (fun _ => True) (fun _ _ => True)).cur e)) : False := by
-  obtain ⟨z, _, hz⟩ := fix_body_has_base_case wf
-    (Expr.fixSelfCall (fns := []) (PExprs.ids params) dec (fun _ _ => trivial)
-      (.ret (.var .here) (fun _ _ => trivial))) () x trivial
+  obtain ⟨z, _, hz⟩ := fix_body_has_base_case (GL := []) () wf
+    (Expr.fixSelfCall (fns := []) (PExprs.ids params) (PExprs.ids_isNF _) dec
+      (fun _ _ => trivial) (.ret (.var .here) rfl (fun _ _ => trivial))) () x trivial
   rw [Expr.firstCall] at hz
   cases hz
 

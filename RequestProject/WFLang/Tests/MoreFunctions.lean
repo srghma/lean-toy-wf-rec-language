@@ -7,10 +7,10 @@ import RequestProject.WFLang.Tests.Functions
   outside of the `WellFounded.fix`): `addK`, `powMod`, `countDown`, `countAbove`;
 * **structural recursion** (no `termination_by`; Lean uses the recursor instead of
   `WellFounded.fix`): `fact`, `evenS`, `addIter`, `fib`;
-* **calls to other functions**: non-recursive ones are inlined (`double` in `sumDoubles`),
-  recursive ones become nested `fix` nodes (`gcd` in `gcdSum`, `lcmGcd`,
-  `countCoprime`; `fact` in `sumFacts`; several of them in `chain`; two loops in `twoLoops`;
-  `Tco.mc91Loop` in the uploaded `Tco.mc91TR`);
+* **calls to other functions**, which become global functions of the captured program (none of
+  them is marked `@[inlinable]`): a non-recursive one (`double` in `sumDoubles`), recursive
+  ones (`gcd` in `gcdSum`, `lcmGcd`, `countCoprime`; `fact` in `sumFacts`; several of them in
+  `chain`; two loops in `twoLoops`; `Tco.mc91Loop` in the uploaded `Tco.mc91TR`);
 * a call of a recursive function inside the body of a recursive function (`gcdLoop`);
 * **mutual recursion**: `Mutual.isEven`/`isOdd` (structural), `Mutual.downA`/`downB`
   (well-founded, `termination_by`), `Mutual.mod3a`/`mod3b`/`mod3c` (a group of three).
@@ -67,7 +67,7 @@ def fib : Nat → Nat
 
 /-! ## Calls to other functions -/
 
-/-- Non-recursive helper (inlined by the capture). -/
+/-- Non-recursive helper (a global function of the capture of `sumDoubles`). -/
 def double (n : Nat) : Nat := n + n
 
 def sumDoubles (n : Nat) : Nat := if n = 0 then 0 else double n + sumDoubles (n - 1)

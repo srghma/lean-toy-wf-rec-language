@@ -18,15 +18,17 @@ result of every call is bound to a new variable (`fixSelfCall` for a recursive c
 `fnCall` for a call of a local function); and the two compound statements occur only in tail
 position: `ite` (case) and `fix`, which is a `letrec f := fix … in rest` whose scope is the rest
 of the computation. Loops and folds are `fix` nodes too, so they are also in tail position. A
-Lean `if`/`match` with a call in non-tail position is captured by duplicating the rest of the
-computation into both branches, and a call of a recursive function or a loop in non-tail
+Lean `if`/`match` with a call in non-tail position is captured with a join point
+(`join j (v) := rest in if c then (…; jump j a) else (…; jump j b)`, see `GRAMMAR.md`; the rest
+of the computation is copied into both branches instead when a call in scope has a
+postcondition), and a call of a recursive function or a loop in non-tail
 position becomes `fix g := … in let v := g args in k`.
 
 ## 1. Capture-only gaps (the grammar could already express them): all closed
 
 | example (`Tests/GapFunctions.lean`) | shape | how it is captured |
 |---|---|---|
-| `callInInnerIf` | `1 + (if c then f a else f b)` | the continuation is duplicated into both branches of the `ite` |
+| `callInInnerIf` | `1 + (if c then f a else f b)` | the continuation becomes a join point, and both branches of the `ite` jump to it |
 | `callInAnd` | `!(c && f n)` in non-tail position | `a && b` becomes `if a then b else false` (`\|\|` likewise), then as above |
 | `boolMatch` | `match b with \| true => … \| false => …` | `Bool.casesOn` is the test `b`, branches swapped |
 | `litPatterns` | `\| 1 => … \| 5 => … \| n+2 => …` | the casts (`▸`) of the unfolded matcher are erased; each literal is an `n = k` test |

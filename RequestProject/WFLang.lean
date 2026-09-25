@@ -1,8 +1,11 @@
 import RequestProject.WFLang.Core.Types
 import RequestProject.WFLang.Core.PExpr
+import RequestProject.WFLang.Core.Normal
 import RequestProject.WFLang.PCL.Lang
+import RequestProject.WFLang.PCL.Size
 import RequestProject.WFLang.PCL.Termination
 import RequestProject.WFLang.Capture.Meta
+import RequestProject.WFLang.Capture.Optimize
 import RequestProject.WFLang.Capture.Translate
 import RequestProject.WFLang.Capture.Elab
 import RequestProject.WFLang.Tests.Functions
@@ -16,6 +19,8 @@ import RequestProject.WFLang.Tests.Sources
 import RequestProject.WFLang.Tests.GapFunctions
 import RequestProject.WFLang.Tests.Gaps
 import RequestProject.WFLang.Tests.Joins
+import RequestProject.WFLang.Tests.Normal
+import RequestProject.WFLang.Tests.Globals
 
 /-!
 # PCL: a typed toy language capturing well-founded Lean functions

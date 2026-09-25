@@ -76,33 +76,6 @@ termination_by n
 
 end JoinEx
 
-namespace WFLang.PCL
-
-/-- The number of statement nodes of a program. -/
-def Expr.size : {Γ : List Ty} → {G : Env Γ → Prop} → {fns : List Fn} →
-    {sf : Option (Self Γ)} → {t : Ty} → {Q : Env Γ → t.denote → Prop} → {js : JScope Γ t} →
-    Expr Γ G fns sf t Q js → Nat
-  | _, _, _, _, _, _, _, .ret _ _ => 1
-  | _, _, _, _, _, _, _, .ite _ a b => 1 + a.size + b.size
-  | _, _, _, _, _, _, _, .fixSelfCall _ _ _ k => 1 + k.size
-  | _, _, _, _, _, _, _, .fnCall _ _ _ k => 1 + k.size
-  | _, _, _, _, _, _, _, .fix _ _ _ _ _ _ body rest => 1 + body.size + rest.size
-  | _, _, _, _, _, _, _, .join _ _ body m => 1 + body.size + m.size
-  | _, _, _, _, _, _, _, .jump _ _ _ _ => 1
-
-/-- The number of `join` nodes of a program. -/
-def Expr.joins : {Γ : List Ty} → {G : Env Γ → Prop} → {fns : List Fn} →
-    {sf : Option (Self Γ)} → {t : Ty} → {Q : Env Γ → t.denote → Prop} → {js : JScope Γ t} →
-    Expr Γ G fns sf t Q js → Nat
-  | _, _, _, _, _, _, _, .ret _ _ => 0
-  | _, _, _, _, _, _, _, .ite _ a b => a.joins + b.joins
-  | _, _, _, _, _, _, _, .fixSelfCall _ _ _ k => k.joins
-  | _, _, _, _, _, _, _, .fnCall _ _ _ k => k.joins
-  | _, _, _, _, _, _, _, .fix _ _ _ _ _ _ body rest => body.joins + rest.joins
-  | _, _, _, _, _, _, _, .join _ _ body m => 1 + body.joins + m.joins
-  | _, _, _, _, _, _, _, .jump _ _ _ _ => 0
-
-end WFLang.PCL
 
 namespace ExJoin
 open PCL
@@ -128,7 +101,7 @@ theorem mixed_agree : ∀ n, Term.eval mixed_term n = JoinEx.mixed n := by wf_ag
 #guard_msgs in
 #eval [alt_term.joins, seq4_term.joins, nested_term.joins, viaMatch_term.joins, mixed_term.joins]
 
-/-- info: [12, 26, 17, 12, 18] -/
+/-- info: [12, 26, 17, 12, 17] -/
 #guard_msgs in
 #eval [alt_term.size, seq4_term.size, nested_term.size, viaMatch_term.size, mixed_term.size]
 

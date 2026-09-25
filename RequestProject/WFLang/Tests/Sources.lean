@@ -18,7 +18,7 @@ theorems into `SourceProofs.lean`.  This file accounts for **each** of those fun
 | `ackWhile`                   | Ack       | rejected: `while` loop              | runtime check below  |
 | `…Cantor….pair`              | Ack       | captured (no recursion)             | `ExNonRec.pair_agree` |
 | `…Cantor….isqrt`             | Ack       | rejected: `while` loop              | runtime check below  |
-| `…Cantor….unpairLeft/Right`  | Ack       | rejected: inlined `isqrt` is a loop | runtime check below  |
+| `…Cantor….unpairLeft/Right`  | Ack       | rejected: global `isqrt` is a loop  | runtime check below  |
 | `…Cantor….ackNoDataStructure`| Ack       | rejected: `while` loop              | runtime check below  |
 | `diagonal`                   | Diagonal  | captured                            | `ExPCL.diagonal_agree` |
 | `diagonal_tr`                | Diagonal  | captured                            | `ExPCL.diagonal_tr_agree` |
@@ -176,7 +176,8 @@ first line of the error message. -/
 #expect_reject (#lean_wf_func_to_term Tco.AckWithoutStackButUsingCantorPairing.isqrt :
   PCL.Term ⟨[.nat], .nat⟩)
 
--- `unpairLeft`/`unpairRight` are not recursive, but the `isqrt` they call (inlined) is a loop.
+-- `unpairLeft`/`unpairRight` are not recursive, but the `isqrt` they call (a global function) is
+-- a loop.
 /-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
 #guard_msgs in
 #expect_reject (#lean_wf_func_to_term Tco.AckWithoutStackButUsingCantorPairing.unpairLeft :

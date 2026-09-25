@@ -10,8 +10,10 @@ import RequestProject.WFLang.Core.Loops
   equation (`withEqnRhs`), the `WellFounded.fix` Lean used to define it (`findFixIn`), the
   decreasing proofs at its recursive call sites (`callSiteProofs`), and the pull-back of its
   well-founded relation to environments (`pullBackRel`, `closedRel`, `closedFixOf`);
-* calls to other user functions: non-recursive ones are inlined (`inlineCalls`), recursive ones
-  are reported (`recCallees`) so that the capture turns them into nested `fix` nodes;
+* calls to other user functions: the attribute `@[inlinable]`; non-recursive `@[inlinable]`
+  functions are inlined (`inlineCalls`), recursive `@[inlinable]` ones are reported
+  (`recCallees`) so that the capture turns them into nested `fix` nodes at the call site, and
+  the other ones are collected as global functions of the program (`collectGlobals`);
 * the skeleton of the agreement tactic (`agreeTarget`, `agreeRec`, `rewriteCalleesWith`) and the
   tactics `wf_dec` (one decrease obligation) and `wf_close` (the goals left after unfolding).
 -/
@@ -390,7 +392,30 @@ def isWFRec (fn : Name) : MetaM Bool := do
   forallTelescope (← inferType (← mkConstWithLevelParams fn)) fun xs _ => do
     return (← findFixIn? fn xs).isSome
 
+/-- The group of mutually recursive functions `fn` belongs to (with at least two members). -/
+def mutualGroup? (fn : Name) : MetaM (Option (Array Name)) := do
+  let env ← getEnv
+  if let some i := Lean.Elab.Structural.eqnInfoExt.find? env fn then
+    if i.declNames.size > 1 then return some i.declNames
+  if let some i := Lean.Elab.WF.eqnInfoExt.find? env fn then
+    if i.declNames.size > 1 then return some i.declNames
+  return none
+
 /-! ## Calls to other functions -/
+
+/-- `@[inlinable]` marks a function whose calls `#lean_wf_func_to_term` inlines: a
+non-recursive function is replaced by its body, a recursive one becomes a local recursive
+function (`fix`) at the call site.  The calls of the functions *not* marked `@[inlinable]` are
+calls of **global functions**: each such function is captured once, as an entry of the global
+context of the program, and called from there (`Expr.gCall`). -/
+initialize inlinableAttr : TagAttribute ←
+  registerTagAttribute `inlinable
+    "#lean_wf_func_to_term inlines the calls of this function (otherwise it is a global function of the captured program)"
+
+/-- Is `c` marked `@[inlinable]`? -/
+def isInlinable (c : Name) : CoreM Bool :=
+  return inlinableAttr.hasTag (← getEnv) c
+
 
 /-- Is `c` a constant of a library (`Init`, `Std`, `Lean`, `Mathlib`, `Batteries`)?  Library
 functions are primitives of the translation or unsupported, never inlined. -/
@@ -415,19 +440,16 @@ def isUserFn (fn c : Name) : MetaM Bool := do
 def userCallees (fn : Name) (e : Lean.Expr) : MetaM (Array Name) :=
   e.getUsedConstants.filterM (isUserFn fn)
 
-/-- The recursive user-defined functions called in `e` (other than `fn`).  The capture turns
-each of them into a nested `fix` node. -/
-def recCallees (fn : Name) (e : Lean.Expr) : MetaM (Array Name) := do
-  (← userCallees fn e).filterM isWFRec
-
-/-- Inline the fully applied calls of *non-recursive* user-defined functions in `e` (using their
-unfolding equations `g.eq_def`, transitively).  Returns the new term and the unfolding
-equations used. -/
+/-- Inline the fully applied calls of the *non-recursive* user-defined functions marked
+`@[inlinable]` in `e` (using their unfolding equations `g.eq_def`, transitively).  Returns the
+new term and the unfolding equations used.  The calls of the other non-recursive functions
+stay: they become calls of global functions. -/
 def inlineCalls (fn : Name) (e : Lean.Expr) : MetaM (Lean.Expr × Array Name) := do
   let used ← IO.mkRef (#[] : Array Name)
   let e ← Meta.transform e (post := fun e => do
     let .const c _ := e.getAppFn | return .continue
     unless ← isUserFn fn c do return .continue
+    unless ← isInlinable c do return .continue
     if ← isWFRec c then return .continue
     let (argTys, _) ← signatureOf c
     unless e.getAppNumArgs == argTys.length do return .continue
@@ -505,6 +527,89 @@ def isSpecFn (fn c : Name) : MetaM Bool := do
       let d ← x.fvarId!.getDecl
       isSpecBinder d.type d.binderInfo
 
+/-- A quick syntactic test: does `rhs` apply a recursive function with function parameters to
+a function argument that mentions `fn`? -/
+def hoCandidate (fn : Name) (rhs : Lean.Expr) : MetaM Bool := do
+  let found ← IO.mkRef false
+  Meta.forEachExpr rhs fun e => do
+    let .const g _ := e.getAppFn | return
+    if g == fn then return
+    if e.getAppArgs.any (fun a => (a.find? (·.isConstOf fn)).isSome) then
+      if ← isSpecFn fn g then found.set true
+  found.get
+
+/-- Does the recursive function `g` call itself inside a function argument (e.g. in the body
+of a `for` loop)?  Such a function is captured together with the specialised loop (`HOInfo`),
+always at its call site. -/
+def callsSelfInFnArg (g : Name) : MetaM Bool := do
+  let some eqn ← getUnfoldEqnFor? g (nonRec := true) | return false
+  forallTelescope (← inferType (← mkConstWithLevelParams eqn)) fun _ eq => do
+    let some (_, _, rhs) := eq.eq? | return false
+    hoCandidate g (← normLoops (← Core.betaReduce rhs))
+
+/-- Is the call of `c` (from the capture of `fn`) a call of a **global function**?  That is the
+case of every first-order user-defined function not marked `@[inlinable]`, except the members
+of a group of mutually recursive functions and the functions calling themselves inside a
+function argument, which are always captured at their call sites (as are the functions with
+function parameters, which are specialised to the arguments of each call). -/
+def isGlobalFn (fn c : Name) : MetaM Bool := do
+  unless ← isUserFn fn c do return false
+  if ← isInlinable c then return false
+  if (← mutualGroup? c).isSome then return false
+  if (← isWFRec c) && (← callsSelfInFnArg c) then return false
+  return true
+
+/-- The recursive user-defined functions called in `e` (other than `fn`) that the capture turns
+into a local recursive function (`fix` node) at the call site: those marked `@[inlinable]`, and
+those that cannot be global functions (see `isGlobalFn`). -/
+def localRecCallees (fn : Name) (e : Lean.Expr) : MetaM (Array Name) := do
+  (← userCallees fn e).filterM fun c => return (← isWFRec c) && !(← isGlobalFn fn c)
+
+/-- The user-defined functions called in `e` (other than `fn`) that are not inlined: the local
+recursive functions and the global functions.  Their values appear in the agreement proofs as
+`fixFn …` terms, identified by uniqueness (`rewriteCalleesWith`). -/
+def recCallees (fn : Name) (e : Lean.Expr) : MetaM (Array Name) := do
+  (← userCallees fn e).filterM fun c => return (← isWFRec c) || !(← isInlinable c)
+
+/-- Can the definition of `c` contain calls to take into account when collecting the global
+functions (a user definition of this project, not an auxiliary one)? -/
+def isTraversable (c : Name) : MetaM Bool := do
+  if isInternalName c || (← isLibraryConst c) || (← isMatcher c) then return false
+  if (`WFLang).isPrefixOf c then return false
+  return (← getConstInfo c).isDefinition
+
+/-- The global functions of the capture of `root`, callees first: every function `g` with
+`isGlobalFn root g` reachable from `root` through the definitions that are captured (`root`,
+its group, the inlined, local and specialised functions, and the global functions
+themselves).  Each global function only calls global functions that come before it. -/
+partial def collectGlobals (root : Name) (extra : Array Name := #[]) : MetaM (Array Name) := do
+  let visited ← IO.mkRef ({} : NameSet)
+  let out ← IO.mkRef (#[] : Array Name)
+  let rec visit (f : Name) : MetaM Unit := do
+    if (← visited.get).contains f then return
+    visited.modify (·.insert f)
+    let some eqn ← (try getUnfoldEqnFor? f (nonRec := true) catch _ => pure none) | return
+    let consts ← forallTelescope (← inferType (← mkConstWithLevelParams eqn)) fun _ eq => do
+      let some (_, _, rhs) := eq.eq? | return #[]
+      let (rhs, _) ← inlineCalls f (← normLoops (← Core.betaReduce rhs))
+      return rhs.getUsedConstants
+    for c in consts do
+      if c == root || c == f then continue
+      unless ← isTraversable c do continue
+      visit c
+      if (← isGlobalFn root c) && !(← out.get).contains c then out.modify (·.push c)
+  let group := (← mutualGroup? root).getD #[root]
+  visited.modify fun v => group.foldl (·.insert ·) v
+  for g in group do
+    visited.modify (·.erase g)
+    visit g
+  -- the constants of the function arguments of a specialised root
+  for c in extra do
+    if c == root || !(← isTraversable c) then continue
+    visit c
+    if (← isGlobalFn root c) && !(← out.get).contains c then out.modify (·.push c)
+  out.get
+
 /-- The reference to the specialised copy of `g` called with the arguments `args` (the
 specialised positions `sp`), and the lifted variables (the free variables of the specialised
 arguments, in context order). -/
@@ -540,7 +645,7 @@ def specRefsIn (fn : Name) (e : Lean.Expr) : MetaM (Array FnRef) := do
 /-- Run `k ys xs rhs` on the lifted variables `ys`, the arguments `xs` and the right-hand side
 of the unfolding equation `fn.eq_def : ∀ xs, fn xs = rhs` (at the specialised values, for a
 specialised reference), in which bounded loops are rewritten (`normLoops`) and the calls of
-non-recursive user-defined functions are inlined (`inlineCalls`). -/
+non-recursive `@[inlinable]` functions are inlined (`inlineCalls`). -/
 def withEqnRhs' {α : Type} (fn : FnRef)
     (k : Array Lean.Expr → Array Lean.Expr → Lean.Expr → TermElabM α) : TermElabM α := do
   let some eqn ← getUnfoldEqnFor? fn.name (nonRec := true) |
@@ -811,15 +916,6 @@ def closedFixOf (f : FnRef) : MetaM (Option (Lean.Expr × Lean.Expr × Array Lea
 
 /-! ## Mutual recursion -/
 
-/-- The group of mutually recursive functions `fn` belongs to (with at least two members). -/
-def mutualGroup? (fn : Name) : MetaM (Option (Array Name)) := do
-  let env ← getEnv
-  if let some i := Lean.Elab.Structural.eqnInfoExt.find? env fn then
-    if i.declNames.size > 1 then return some i.declNames
-  if let some i := Lean.Elab.WF.eqnInfoExt.find? env fn then
-    if i.declNames.size > 1 then return some i.declNames
-  return none
-
 /-- The reference to `fn`, as a member of its group of mutually recursive functions if it has
 one. -/
 def FnRef.ofName (fn : Name) : MetaM FnRef := do
@@ -1015,17 +1111,6 @@ def fnSolutionHO (fName : Name) (fSig : FnSig) (gRef : FnRef) (gSig : FnSig) :
       let postX := mkLambda `v .default retD (mkConst ``True)
       mkLambdaFVars #[x, hx]
         (mkApp4 (mkConst ``Subtype.mk [levelOne]) retD postX v (Lean.mkConst ``True.intro))
-
-/-- A quick syntactic test: does `rhs` apply a recursive function with function parameters to
-a function argument that mentions `fn`? -/
-def hoCandidate (fn : Name) (rhs : Lean.Expr) : MetaM Bool := do
-  let found ← IO.mkRef false
-  Meta.forEachExpr rhs fun e => do
-    let .const g _ := e.getAppFn | return
-    if g == fn then return
-    if e.getAppArgs.any (fun a => (a.find? (·.isConstOf fn)).isSome) then
-      if ← isSpecFn fn g then found.set true
-  found.get
 
 /-! ## Tactics -/
 
@@ -1303,7 +1388,7 @@ partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees :
     Tactic.TacticM Unit := do
   if (← Tactic.getGoals).isEmpty then return
   let tgt ← Tactic.withMainContext do instantiateMVars (← Tactic.getMainTarget)
-  let some fx := tgt.find? (·.isAppOfArity `WFLang.PCL.fixFn 11) | return
+  let some fx := tgt.find? (·.isAppOfArity `WFLang.PCL.fixFn 13) | return
   let fnStx ← Tactic.withMainContext do exprToSyntax fx.appFn!.appFn!
   -- the candidates: the recursive callees, and the specialised copies called in the goal
   let specs ← Tactic.withMainContext do specRefsIn .anonymous tgt
@@ -1318,7 +1403,7 @@ partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees :
       | continue
     -- only callees with the signature of the node are candidates
     let fits ← Tactic.withMainContext do
-      return (← isDefEq (fx.getArg! 0) (mkTyList argTys)) && (← isDefEq (fx.getArg! 1) retTy)
+      return (← isDefEq (fx.getArg! 2) (mkTyList argTys)) && (← isDefEq (fx.getArg! 3) retTy)
     unless fits do continue
     let saved ← saveState
     try
@@ -1336,7 +1421,7 @@ partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees :
         let pf ← mkFreshExprSyntheticOpaqueMVar hTy
         let rest ← Term.withoutErrToSorry <| Tactic.run pf.mvarId! <| Tactic.withoutRecover do
           Tactic.evalTactic (← `(tactic| (
-            refine $(mkIdent `WFLang.PCL.fixFn_unique) _ _ _ $F ?_
+            refine $(mkIdent `WFLang.PCL.fixFn_unique) _ _ _ _ $F ?_
             intro x hx
             dsimp only)))
           if g.group.isEmpty then
@@ -1378,7 +1463,7 @@ def agreeRec (fn : FnRef) (t eqDef : Ident) (simpStep : TSyntax `tactic)
       intros
       try simp only [$(mkIdent `WFLang.PCL.Term.eval):ident, $(mkIdent `WFLang.PCL.Term.run):ident, WFLang.curryEnv]
       rw [$t:ident]
-      refine Eq.trans ($(mkIdent `WFLang.PCL.PTerm.ofFix_run) _ _ _ $F ?hF _ _) ?heq
+      refine Eq.trans ($(mkIdent `WFLang.PCL.PTerm.ofFix_run) _ _ _ _ $F ?hF _ _) ?heq
       case heq => rfl
       intro x hx
       dsimp only)))

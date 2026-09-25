@@ -1,3 +1,81 @@
+# Summary of changes for run 7b1b1f57-889e-4feb-9509-6ecefccf7783
+Mathlib was already installed: `lakefile.toml` requires it at tag `v4.28.0`, the same version as the Lean toolchain, and its compiled files were present. Before this run it was only used in two places (`Relation.ReflTransGen` and the `casesm` tactic). I refactored the parts where Mathlib replaces hand-written code. The full `lake build` passes, including every test, and so does `lake build wfbench`. There is no `sorry` in the project, and no statement of any user-facing theorem changed.
+
+**Changes**
+- **Well-founded relations (`Core/Types.lean`)**
+  - I added one general lemma, `fibreRel_wf`: a relation that keeps some values `f x` fixed and relates the rest `g x` by `r (f x)` is well-founded if every `r k` is.
+  - It is proved with Mathlib's `WellFounded.psigma_lex`, `InvImage.wf` and `Subrelation.wf` (a lexicographic order with the empty relation on the fixed part), instead of a hand-written induction.
+  - `fixedRel_wf` and `fixedAtRel_wf` are now one-line instances of it. `preRel_wf` uses it on the environments that satisfy the precondition.
+  - The definitions and signatures are unchanged, so the capture elaborator that builds these terms needed no changes.
+- **Empty relation (`PCL/Lang.lean`, `Capture/Elab.lean`)**: I removed the project's own `emptyRel` / `emptyRel_wf`. Non-recursive global functions now use the library's `emptyRelation` / `emptyWf.wf`.
+- **Iteration (`Tests/SourceProofs.lean`)**
+  - I added `iter_eq_iterate` and `hyperLoop_eq_iterate`, which show that the uploaded helpers `iter` and `hyperLoop` are Mathlib's `Function.iterate` (`f^[n]`).
+  - `hyperLoop_step` and `mc91Loop_eq` are now proved with Mathlib's iterate lemmas. `mc91Loop_eq` no longer needs `grind`.
+  - The uploaded function definitions themselves are untouched, and the file header records the change.
+- **Documentation**: `README.md` has a new "Use of Mathlib" section, and `GRAMMAR.md` and the docstrings now name `emptyRelation`.
+
+**Considered but not changed**
+- **Environments on Mathlib's `List.TProd`**: I tried this, but because `List.TProd` is defined with `List.foldr`, Lean can no longer work out the context from a pair `(v, env)`. That breaks the elaboration of the captured programs, so environments stay a right-nested tuple `Env`.
+- **`hoRel_wf`** (recursion through a function argument): its relation is neither a lexicographic nor an inverse-image order, so it keeps its own proof.
+
+The docstring of `Globals` in `PCL/Lang.lean` now names `emptyRelation`. I did not update the matching entry in the Properties table, so its code snippet may still show the old wording; the claim itself is unaffected.
+
+# Summary of changes for run 212c9355-bb93-4d38-9b3a-d56ec45ff3fd
+Both parts of the request are done. The full `lake build` passes, including the whole test suite, and so does `lake build wfbench`. There is no `sorry` in the project. The agreement theorems for the new tests use only the standard axioms (`propext`, `Quot.sound`).
+
+**1. Optimised ("B-normal") form, enforced by the grammar**
+- `Core/Normal.lean` defines `PExpr.isNF` and `PExpr.isCond`. An expression fails `isNF` if it still has any of these:
+  - an operator applied only to literals (a constant that could be folded);
+  - an algebraic identity (`x + 0`, `x * 1`, `x * 0`, `x ^ 1`, `b && true`, `xor b false`, `l ++ []`, …, and the same on `Int`);
+  - `!!b`, `- - i` or `(a, b).1`;
+  - an `if` on a literal or a negation, an `if` between two equal literals, or `if c then true else false`.
+- Every `PCL.Expr` constructor that holds a call-free expression now also holds a proof that it is in normal form, checked by `decide` and erased at runtime. Every `if` test must also be a condition. So a program that could still be simplified does not type-check.
+- The capture simplifies while it translates (`Capture/Optimize.lean`: constant folding, identities, dead branches, swapping negated tests), so what it produces always satisfies these checks. The agreement proofs are about the simplified programs.
+- `Tests/Normal.lean` has three functions full of simplifiable subterms (`optEx`, `listEx`, `boolEx`). Their captures agree with the Lean functions, and their sizes are pinned (9, 1 and 1 nodes). The file also checks `isNF` on examples and shows that hand-written unsimplified programs are rejected.
+
+**2. `@[inlinable]` and the global context**
+- A program (`PTerm`) is now a global context plus a main statement. The global context (`Globals`) is an ordered list of closed well-founded functions, each of which may call the ones before it. `Expr` takes the globals' signatures as a parameter, and the new statement `gCall` calls a global function.
+- `#lean_wf_func_to_term` inlines functions marked `@[inlinable]`. A recursive one becomes a local `fix` at each call site.
+- Any other called user function is captured once, as an entry of the global context, and each call becomes a `gCall`.
+- Exceptions: functions with function parameters, members of a mutual group, and functions calling themselves inside a function argument are still captured at the call site.
+- A caller only knows a global function's postcondition, not its definition. So if a termination proof needs a helper's value, the helper must be `@[inlinable]`. `logHalfG` in `Tests/Globals.lean` shows this: with its helper not marked, the capture reports a termination error.
+- Soundness (`fixFn_eq`, `fixFn_unique`, `PTerm.run_post`) and the termination theorems were re-proved for the new grammar.
+- `Tests/Globals.lean` covers 7 functions: global vs inlined callees, a global calling a global, a global with a subtype postcondition, an `@[inlinable]` helper needed for termination, and the uploaded `gcd` used as a global. All agree with their Lean definitions. The number of globals, global calls, local `fix` nodes and sizes are pinned; for example, sharing `sumTo` as a global gives 11 nodes against 19 when it is inlined.
+- The existing tests all still build. Callees in them that aren't marked `@[inlinable]` are now globals; for example, `Tco.mc91TR` calls the global `mc91Loop`.
+
+**Documentation:** `README.md` (grammar, global context, `@[inlinable]`, file layout), `GRAMMAR.md` (new sections on the normal form and the global context), and the header comments of `PCL/Lang.lean`, `Capture/Meta.lean` and `Capture/Elab.lean` are updated. The Properties table has new entries for the normal form, the global context and programs, and the new agreement results, and outdated entries were refreshed. All work is committed.
+
+# Summary of changes for run e0d7981d-2640-45c3-a9ec-504fc1733e02
+Join points were worth adding, so I added them. A separate `Atom` layer was not, so I left it out. The full reasoning is in the new `GRAMMAR.md`. `lake build` passes (the test suite is part of it), `lake build wfbench` passes, and there is no new `sorry` or axiom. `#print axioms` on the new agreement theorems and on `fixFn_unique` / `fix_body_reaches_base` shows only `propext` and `Quot.sound`.
+
+**Why join points.** A non-tail `if` with a call, like `(if c then f a else f b) + rest`, used to be handled by copying `rest` into both branches, so `k` such `if`s in a row made `2^k` copies. Now the capture writes:
+`join j (v) := rest in if c then (…; jump j a) else (…; jump j b)`
+
+- With join points, 2, 3 and 4 `if`s in a row (`seq2`/`seq3`/`seq4`) give 16, 21 and 26 nodes.
+- With copying, `seq2`/`seq3` give 15 and 27. `seq4` did not finish elaborating within 4,000,000 heartbeats when I tried it; that run is not in the build.
+- When `rest` is tiny, copying is smaller: `nested` has 17 nodes with join points and 13 with copies.
+
+**Grammar changes** (`PCL/Lang.lean`)
+- `Expr` has two new statements, `join` and `jump`, and a new index `js : JScope Γ t` listing the join points in scope.
+- A join point has a precondition on its parameter (each jump proves it) and keeps the postcondition of the place where it is defined.
+- It is not a function: not recursive, only jumped to in tail position, and not visible inside `fix` bodies.
+- The evaluator is still total structural recursion with no fuel: `join` passes a closure of its body, and `jump` calls it.
+
+**One design detail.** My first version tracked join points as a list that was re-mapped at every new variable. The build passed, but the agreement proofs timed out because `simp` could not reduce jumps through the re-mapping. `JScope` instead makes "one more variable in scope" its own constructor. That step is then free at runtime, and the lookup lemmas are definitional equalities that `simp` applies.
+
+**Re-proved for the new grammar:** `fixFn_eq`, `fixFn_unique`, `PTerm.ofFix_run`, `Term.ofFix_eval(_post)`, `fix_body_reaches_base` (it now follows a `jump` into the join point's body), `fix_body_has_base_case` and `loop_unbuildable`. All existing agreement theorems and runtime checks build unchanged.
+
+**Capture** (`Capture/Elab.lean`)
+- Every non-tail `if`/`match` containing a call now uses a join point.
+- It still copies when a call in scope returns a subtype, because the rest of the computation may need that result's property in its termination proofs.
+- `set_option wfLang.joinPoints false` brings back copying everywhere.
+
+**Tests:** new `Tests/Joins.lean`. It has agreement theorems for `alt`, `seq3`, `seq4`, `nested`, `viaMatch` and `mixed` (a call to `gcd` in one branch), plus `seq3` captured with copying. Join-point counts and node counts, with and without join points, are pinned by `#guard_msgs`, and there are runtime checks against the Lean functions.
+
+**Why no `Atom` layer.** Restricting operators to atoms matters when evaluation order, effects or a machine model matter. Here `PExpr` is pure and total, and the only effect (calls) is already pulled out into `fixSelfCall`/`fnCall`. The one real benefit would be sharing: currently a Lean `let` with a call-free value is substituted, so a value used twice is computed twice. A pure `let v := p in k` statement would fix that more cheaply. `GRAMMAR.md` lists it as the next candidate, with three other options I did not implement.
+
+README, GAPS.md and the Properties table (`Expr`, the soundness and base-case theorems, and a new join-point entry) are updated, and the work is committed.
+
 # Summary of changes for run 5ff14f2e-5c6e-479b-9737-e934b0a09445
 `#lean_wf_func_to_term` now captures every item in GAPS.md except calls under a `fun` inside library code like `List.map` (details below). The language is stricter too: as you asked, local recursive functions and loops now sit only in tail position. `lake build` passes and the tests are part of it. There is no `sorry` or new axiom. `#print axioms` on a sample of the agreement theorems (`hyperWhile_term_agree`, `boom_agree`, `gcdSum_agree`, `isEven_agree`) shows only `propext`, `Quot.sound` and `Classical.choice`.
 

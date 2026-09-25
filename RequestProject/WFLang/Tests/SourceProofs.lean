@@ -1,4 +1,5 @@
 import RequestProject.WFLang.Tests.Functions
+import Mathlib.Logic.Function.Iterate
 
 /-!
 # The theorems of the uploaded files
@@ -9,17 +10,34 @@ were removed; `Sources.lean` uses them to transfer the `PCL` agreement theorems 
 functions that `PCL` cannot capture directly (`ack2`, `hyperTCO`, `hyperWhile`).
 
 Changes with respect to the uploaded files:
-* `mc91Loop_eq`, case `case1`: `grind => instantiate only [mc91Loop, iter]` became
-  `simp [mc91Loop, iter]` (the `grind =>` syntax does not exist in this Lean version).
+* `mc91Loop_eq`: the uploaded proof used `grind => instantiate only [mc91Loop, iter]`, whose
+  syntax does not exist in this Lean version; it is now proved through `Function.iterate`
+  (see the last item).
 * `diagonalWhile_eq` (`diagonalWhile m n = diagonal m n`) is **not** included.  Its proof was
   written for a later Lean (`v4.34.0`) whose `mvcgen` has a specification for `while` loops.  In
   this project's Lean (`v4.28.0`) a `while` loop is `Lean.Loop.forIn`, defined through a private
   `partial` function, which is opaque to proofs, so the statement cannot be proved here.
   `Sources.lean` checks it on sample inputs instead (and does the same for the other
   `while`-loop functions).
+* The two iteration helpers `iter` and `hyperLoop` are identified with Mathlib's
+  `Function.iterate` (`f^[n]`, lemmas `iter_eq_iterate`, `hyperLoop_eq_iterate`), and the
+  proofs of `hyperLoop_step` and `mc91Loop_eq` use Mathlib's iterate lemmas instead of
+  unfolding the helpers.
 -/
 
 namespace Tco
+
+/-! ## The iteration helpers are Mathlib's `Function.iterate` -/
+
+theorem iter_eq_iterate (f : Nat → Nat) (c x : Nat) : iter f c x = f^[c] x := by
+  induction c generalizing x with
+  | zero => rfl
+  | succ c ih => rw [iter, ih, Function.iterate_succ_apply]
+
+theorem hyperLoop_eq_iterate (f : Nat → Nat) (b acc : Nat) : hyperLoop f b acc = f^[b] acc := by
+  induction b generalizing acc with
+  | zero => rfl
+  | succ b ih => rw [hyperLoop, ih, Function.iterate_succ_apply]
 
 /-! ## From `TcoAck.lean` -/
 
@@ -83,9 +101,7 @@ theorem diagonal_tr_zero_eq_diagonal (m n : Nat) :
 -- Key property of `hyperLoop`: pulling `f` outside the loop
 theorem hyperLoop_step (f : Nat → Nat) (b acc : Nat) :
     hyperLoop f (b + 1) acc = f (hyperLoop f b acc) := by
-  induction b generalizing acc with
-  | zero => rfl
-  | succ b ih => exact ih (f acc)
+  simp only [hyperLoop_eq_iterate, Function.iterate_succ_apply']
 
 -- Base values match at b = 0
 theorem hyperBase_eq (n a : Nat) : hyperBase (n + 1) a = hyper (n + 1) a 0 := by
@@ -160,23 +176,14 @@ theorem mc91_step_le {n : Nat} (h : n ≤ 100) : mc91 (mc91 (n + 11)) = mc91 n :
 
 -- Step 3: Loop invariant for arbitrary pending call count `c`
 theorem mc91Loop_eq (c n : Nat) : mc91Loop c n = iter mc91 c n := by
+  rw [iter_eq_iterate]
   induction c, n using mc91Loop.induct with
-  | case1 n =>
-    simp [mc91Loop, iter]
+  | case1 n => simp [mc91Loop]
   | case2 c n hgt ih =>
-    unfold mc91Loop
-    split
-    · rw [ih, ← mc91_step_gt hgt]
-      rfl
-    · omega
+    rw [mc91Loop, dif_pos hgt, ih, Function.iterate_succ_apply, mc91_step_gt hgt]
   | case3 c n hle ih =>
-    unfold mc91Loop
-    split
-    · omega
-    · rw [ih]
-      dsimp [iter]
-      simp_all only [gt_iff_lt, not_false_eq_true, Nat.not_lt]
-      grind [= iter, = mc91]
+    rw [mc91Loop, dif_neg hle, ih, Function.iterate_succ_apply, Function.iterate_succ_apply,
+      mc91_step_le (by omega), Function.iterate_succ_apply]
 
 -- Main Theorem: mc91TR n = mc91 n
 theorem mc91TR_eq_mc91 (n : Nat) : mc91TR n = mc91 n := by
