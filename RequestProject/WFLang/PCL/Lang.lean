@@ -1,4 +1,4 @@
-import RequestProject.WFLang.Common.PExpr
+import RequestProject.WFLang.Core.PExpr
 
 /-!
 # Language `PCL`: well-founded recursion as a construct of the grammar (proof-carrying calls)
@@ -16,7 +16,7 @@ In this language well-founded recursion is a constructor of `Expr` itself:
   "Whenever the call is reached" is expressed by the index `G : Env Γ → Prop` of `Expr`: the
   path condition, strengthened by each `ite` branch.
 * Expressions are in A-normal form: arithmetic, comparisons, `bool_eq`, `&&`, `||`, `!` are
-  in the call-free `PExpr` layer (`Common/PExpr.lean`); the result of a call is bound to a new
+  in the call-free `PExpr` layer (`Core/PExpr.lean`); the result of a call is bound to a new
   variable.
 
 The path condition and the decrease proofs only mention `PExpr.eval`, which is defined

@@ -1,3 +1,106 @@
+# Summary of changes for run ebcc0f51-6ff3-48bf-a7c2-d1436d664f80
+I removed the broken `ackWhile`. The corrected loop is now the only version and is called `Tco.ackWhile`. `lake build` succeeds with no errors, and there is no `sorry` in the project.
+
+**Changes**
+- **`Tests/Functions.lean`:** `Tco.ackWhile` now has the corrected push order `top :: (top - 1) :: stack` for the case `A(m, n) = A(m-1, A(m, n-1))`. The file's header now says that the uploaded functions were copied unchanged except for this one.
+- **`Tests/Sources.lean`:**
+  - Removed `ackWhileFixed`, the one-iteration copy of the loop `ackWhileStep`, the `ackWhile_1_1_cycles` theorem, the check that the old version agreed with `ack` only when m = 0, and the section explaining the bug.
+  - What's left for `ackWhile`:
+    - The check that `#lean_wf_func_to_term` still rejects it (it is a `while` loop).
+    - One check that `Tco.ackWhile m n` equals the PCL program for `ack` for m ≤ 3 and n ≤ 4. This compares sample inputs only; it is not a proof, because a `while` loop can't be reasoned about in this Lean version.
+  - The table row for `ackWhile` now says "runtime check below" instead of "diverges".
+- **`README.md`:** removed the reference to the "ackWhile bug".
+- **Properties table:** removed the entry for the divergence of the old `ackWhile`.
+
+# Summary of changes for run da667d5d-3b43-4c7d-b100-06ec4b62c6dc
+You were right: the files in `sources/` weren't built. They imported an external `LeanScript` package, and some of their proofs don't compile with this project's Lean version (4.28). Every function in them is now in the test suite and is either captured by PCL or rejected, with a test for each. `sources/` has been deleted. `lake build` and `lake build wfbench` succeed with no errors, warnings or `sorry`. The new theorems use only the standard axioms (`propext`, `Classical.choice`, `Quot.sound`).
+
+**Where things went**
+- **`Tests/Functions.lean`** (namespace `Tco`): every function from the five files, copied unchanged. That includes `ack999`, `ack2`, `ackWhile`, the Cantor-pairing namespace (`pair`, `isqrt`, `unpairLeft`, `unpairRight`, `ackNoDataStructure`), `diagonalWhile`, `hyperLoop`, `hyperTCO`, `hyperWhile`, `mc91While` and `Safe`. `pair` now sits in its original namespace, and the existing tests use that name.
+- **`Tests/SourceProofs.lean`** (new): the theorems from those files. Two changes:
+  - In `mc91Loop_eq`, one `grind =>` step became `simp`, because that syntax doesn't exist in 4.28.
+  - `diagonalWhile_eq` is left out. Its proof relies on a later Lean's support for reasoning about `while` loops. In 4.28 a `while` loop is built on a private `partial` function that proofs can't look inside, so the statement can't be proved here. It is checked on sample inputs instead.
+  - I also added one theorem, `hyperWhile_eq_hyper`: a `for` loop is a fold over a list, so unlike a `while` loop it can be reasoned about.
+- **`Tests/Sources.lean`** (new): a table covering every function from the files, plus the tests behind it. The scattered copies and rejection tests in `BasicChecks.lean` and `MoreChecks.lean` were merged into it.
+
+**Results per function**
+- **Captured, with a proved agreement theorem:** `ack`, `diagonal`, `diagonal_tr`, `hyper`, `hyperBase`, `mc91`, `mc91Loop`, `mc91TR`, `pair`, and now also `ack999`. `ack999` takes no arguments, and its theorem is proved without computing `ack 999 1`.
+- **Rejected, but proved equal to a captured program:** using the theorems from your files, `ack2` equals the PCL program for `ack`. `hyperTCO` and `hyperWhile` equal the program for `hyper`, and `iter mc91` equals the program for `mc91Loop`.
+- **Rejected, each with a checked error message:**
+  - `while` loops: `ackWhile`, `isqrt`, `unpairLeft`, `unpairRight` (their `isqrt` call is a loop), `ackNoDataStructure`, `diagonalWhile`, `mc91While`.
+  - A recursive call inside a `for` loop: `hyperWhile`.
+  - Function arguments or results: `ack2`, `hyperLoop`, `hyperTCO`, `iter`.
+  - A proposition: `Safe`.
+  - A proof argument: `boom`.
+- **Loop functions checked only on sample inputs:** `diagonalWhile` and `mc91While` against their PCL counterparts; `ackNoDataStructure` against PCL `ack` for m ≤ 2, n ≤ 3; `isqrt` as an integer square root; `unpairLeft`/`unpairRight` as inverses of the captured `pair`. These are sample-input checks, not proofs.
+
+**A bug in your `ackWhile`:** it doesn't compute Ackermann. It runs forever on `ackWhile 1 1` and `ackWhile 2 0`, for example. In the case `A(m, n) = A(m-1, A(m, n-1))` it pushes `(top - 1) :: top :: stack`, so the outer call comes off the stack before the inner one. From m = 1, n = 1 the loop returns to the state (`[1]`, `1`) after two iterations.
+- `ackWhile_1_1_cycles` proves that cycle, but for a hand-written copy of one loop iteration, since the loop itself can't be unfolded in a proof. The rest of the evidence is that running `ackWhile 1 1` doesn't finish.
+- `ackWhile` does agree with PCL `ack` when m = 0, and at m = 1, n = 0.
+- A corrected copy, `ackWhileFixed`, with the two pushes swapped, agrees with PCL `ack` for all tested inputs.
+- Separately, the files' comment that `ackNoDataStructure 3 2` gives 29 didn't hold up in practice: my attempts at inputs like that didn't finish, because the stack encoding grows extremely fast. That's why its checks stop at m ≤ 2.
+
+`README.md` shows the new file layout. In the Properties table, I updated the entries for the uploaded functions and added one for the derived agreement theorems and one for the `ackWhile` cycle. The two older entries still point at lines in the original uploaded files, because the table wouldn't accept a blank source reference.
+
+# Summary of changes for run 2531a267-9d30-4b09-85c3-a34bfe0ddd13
+The project now contains only PCL, reorganised into four folders, and the whole PCL test suite is still there. `lake build` succeeds with no errors, warnings or `sorry`, and the `wfbench` executable builds too. I checked the axioms of `ExPCL.gcd_agree`, `MorePCL.chain_agree`, `fix_body_reaches_base` and `Term.eval_fix_eq`: they use only `propext`, `Quot.sound` and, for `chain_agree`, `Classical.choice`.
+
+**Removed**
+- The other grammars: `Tail`, `Meas` and the `Wrapper` grammar with its four designs (`Guarded`, `GuardedAcc`, `FreeCall`, `Checked`, `Bridge`).
+- The alternative designs `Designs/VC.lean`, `Designs/Ext.lean` and their examples.
+- The tests and examples for those grammars, and `WFBox` and `Ty.default`, which only they used.
+- The unused `RequestProject/Main.lean`.
+- The out-of-date C snapshots in `c_output/`, which still used old module names.
+- The notes that described several grammars: `ASSESSMENT.md`, `DESIGNS.md`, `LANGUAGES.md`, `STRUCTURE.md`.
+
+**New layout** (under `RequestProject/WFLang/`, all imported by `RequestProject/WFLang.lean`)
+- `Core/`: `Types.lean` (types, environments, variables, operators, `fixedRel`) and `PExpr.lean` (expressions without recursive calls).
+- `PCL/`: `Lang.lean` (the language, evaluator and soundness proofs) and `Termination.lean`.
+- `Capture/`: `Meta.lean`, `Translate.lean` and `Elab.lean`.
+- `Tests/`: `Functions.lean`, `Basic.lean`, `BasicChecks.lean`, `MoreFunctions.lean`, `More.lean`, `MoreChecks.lean`.
+- The uploaded `Tco*.lean` files are now in `sources/`, unchanged. They import a `LeanScript` module that isn't in the project, so they aren't built; their functions are copied into `Tests/Functions.lean`.
+
+**Refactoring**
+- There is now one capture command, `#lean_wf_func_to_term`, and one tactic, `wf_agree`. The separate `#lean_wf_func_to_pcl` and `pcl_agree` names are gone, and all error messages start with `#lean_wf_func_to_term:`.
+- The Lean-to-syntax translator no longer supports several target grammars; it produces PCL expressions directly.
+- `wf_close` no longer has the proof steps that only the runtime-checked grammars needed. Every agreement proof still goes through.
+- `Bench.lean` now compares native Lean with PCL only: `lake exe wfbench <native|pcl> <m>`.
+
+**PCL test suite**
+- 30 agreement theorems in total: 12 in `Basic.lean` (`gcd`, `isPow2`, `digitSum`, `sumTo` and the `Tco` functions) and 18 in `More.lean`.
+- All runtime `#guard_msgs` checks were kept. Where a check compared PCL with other grammars, it now checks PCL alone.
+- The `fib` output check used to run on `Meas`; it now runs on PCL.
+- Rejection tests that targeted another grammar but also apply to PCL now target PCL: mutual recursion, `while` loops, higher-order functions and `boom`. Rejections that only made sense for the removed grammars were dropped, such as "not tail recursive" for `Tail`.
+
+`README.md` now describes the PCL language, the capture and the file layout.
+
+In the Properties table, I removed the entries for the deleted grammars and designs. The remaining entries point at the new file paths, and their descriptions now cover PCL only.
+
+The files still don't start with `module`, as before; switching them over would have been a separate change to every file. The Mathlib dependency stays because `PCL/Termination.lean` uses `Relation.ReflTransGen`.
+
+# Summary of changes for run 6fceaade-4cd1-4e9d-b6cc-c57836d635cc
+**Short answer:** in PCL, evaluating a well-typed program can't fail to terminate. There is no error case and no default value. `Expr.eval` returns a value of the result type directly (not an `Option`), and Lean only accepted its definition because it is total. `#print axioms WFLang.PCL.Expr.eval` reports that it uses no axioms at all.
+
+**Why it terminates, even without an explicit check for a return inside the body:**
+- `Expr.eval` recurses structurally on the syntax tree, which is always finite. The only exception is a `fix` node, which runs its body through `WellFounded.fix` on the relation `R` stored in that node.
+- Inside a `fix` body, the only way to recurse is a `call` node. The evaluator makes that call through a handler with the type `(y : Env params) → R y current → result`, so it can't make the call without the proof `dec` that the arguments are `R`-smaller. That proof is a required field of `call`.
+- Together with `wf : WellFounded R` (also a required field of `fix`), this is exactly what `WellFounded.fix` needs. No infinite chain of calls exists, so no fuel and no runtime check are needed.
+
+**Is there a proof that a base case exists?** The evaluator doesn't need one, but it follows from the typing rules. I proved it in the new file `RequestProject/WFLang/PCL/Termination.lean`, with no `sorry`, using only `propext` and `Quot.sound`:
+- `Expr.firstCall body x` gives the arguments of the first recursive call the body makes on input `x`, or `none` if it returns without calling itself.
+- `fix_body_reaches_base`: from any argument `x`, following first calls reaches, in finitely many `R`-steps, an argument where the body returns without recursing. So a body where every path calls itself can't be written with a well-founded `R`.
+- `fix_body_has_base_case` is the corollary: every `fix` body has at least one base-case input.
+- `loop_unbuildable`: the looping program `fix self x. let v := self x in v` can't be built, because its `call` node would need a proof of `R x x` for every `x`, and no well-founded `R` allows that.
+
+The file is imported by `RequestProject/WFLang.lean`, the whole project builds, and both theorems are in the Properties table. It doesn't start with `module`, because none of the project's existing files are modules and a module file can only import other modules.
+
+**Limits of this guarantee:**
+1. **It depends on real proofs.** The proofs are erased in compiled code. If someone supplies `wf` or `dec` using `sorry` or a made-up axiom (for example, claiming a relation that isn't well-founded is), the compiled program could genuinely run forever. Lean warns about such definitions and `#eval` refuses to run them, but nothing is checked at runtime.
+2. **Terminating isn't the same as fast.** A captured Ackermann function terminates in theory but may not finish in practice.
+3. **Resources can still run out.** Compiled PCL uses real recursion, and earlier benchmarks hit stack overflows at about 180k calls. That is a machine limit, not non-termination.
+
+This differs from `Meas`, where the measure is only checked at runtime and a wrong measure makes the evaluator silently return a default value. In PCL, a wrong relation simply means the program can't be written.
+
 # Summary of changes for run 7c368437-a280-45dd-bbb3-ff7688e97e32
 **What happens when the measure is wrong in `Meas`?** The evaluator returns the default value of the result type (`0` for `nat`, `false` for `bool`) for the call that fails the check. It reports nothing, and the rest of the computation uses that made-up value. I proved this on an example: with the wrong measure `(m, 0)`, `gcd 4 6` evaluates to `0` instead of `2` (`ExMeasWrong.gcdWrong_4_6`). Functions captured with `#lean_wf_func_to_term` never hit this case. But you're right that nothing in the language stops a hand-written program from having a bad measure, and the failure is hidden.
 
