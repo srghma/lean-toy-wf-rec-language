@@ -56,6 +56,10 @@ domain `dom`, relation `r`, well-foundedness proof `hwf` and functional `F`.  Th
 and `F` may mention `xs[0], …, xs[nFixed-1]`. -/
 structure FixInfo where
   nFixed : Nat
+  /-- The positions (in `xs`) of the parameters packed into the argument of the fixpoint, in
+  packing order, when they could be read off; `none` if unknown (then the fixed parameters are
+  assumed to be the first `nFixed`). -/
+  varying : Option (List Nat) := none
   dom : Lean.Expr
   r : Lean.Expr
   hwf : Lean.Expr
@@ -74,8 +78,21 @@ def findFixIn (fn : Name) (xs : Array Lean.Expr) : MetaM FixInfo := do
         if B.isLambda && !B.bindingBody!.hasLooseBVars then
           return 1 + (← packed B.bindingBody! fuel)
       return 1
-  let mkInfo (dom r hwf F : Lean.Expr) : MetaM FixInfo := do
-    return { nFixed := xs.size - (← packed dom xs.size), dom, r, hwf, F }
+  -- the parameters packed into the argument `x` of the fixpoint (nested `PSigma.mk`)
+  let rec leaves (x : Lean.Expr) (fuel : Nat) : List Lean.Expr :=
+    match fuel with
+    | 0 => [x]
+    | fuel + 1 =>
+      let x := x.consumeMData
+      if x.isAppOfArity ``PSigma.mk 4 then x.getArg! 2 :: leaves (x.getArg! 3) fuel else [x]
+  let varyingOf (x? : Option Lean.Expr) (n : Nat) : Option (List Nat) := do
+    let x ← x?
+    let ps ← (leaves x xs.size).mapM fun l => xs.findIdx? (· == l)
+    guard (ps.length == n && ps.eraseDups.length == n)
+    return ps
+  let mkInfo (dom r hwf F : Lean.Expr) (x? : Option Lean.Expr) : MetaM FixInfo := do
+    let n ← packed dom xs.size
+    return { nFixed := xs.size - n, varying := varyingOf x? n, dom, r, hwf, F }
   let rec go (e : Lean.Expr) (i : Nat) (unfoldDepth : Nat) : MetaM FixInfo := do
     let e := e.consumeMData.headBeta
     if e.isLambda then
@@ -84,7 +101,7 @@ def findFixIn (fn : Name) (xs : Array Lean.Expr) : MetaM FixInfo := do
       throwError "#lean_wf_func_to_term: {fn} is not defined by well-founded recursion"
     let h := e.getAppFn
     if h.isConstOf ``WellFounded.fix && e.getAppNumArgs ≥ 5 then
-      return ← mkInfo (e.getArg! 0) (e.getArg! 2) (e.getArg! 3) (e.getArg! 4)
+      return ← mkInfo (e.getArg! 0) (e.getArg! 2) (e.getArg! 3) (e.getArg! 4) (if e.getAppNumArgs > 5 then some (e.getArg! 5) else none)
     if h.isConstOf ``WellFounded.Nat.fix && e.getAppNumArgs ≥ 4 then
       let nat := Lean.mkConst ``Nat
       let lt := mkLambda `a .default nat <| mkLambda `b .default nat <|
@@ -93,11 +110,12 @@ def findFixIn (fn : Name) (xs : Array Lean.Expr) : MetaM FixInfo := do
       let hwf ← mkAppM ``InvImage.wf #[e.getArg! 2,
         ← mkAppOptM ``WellFoundedRelation.wf #[none, some (Lean.mkConst ``Nat.lt_wfRel)]]
       let hwf ← mkExpectedTypeHint hwf (← mkAppM ``WellFounded #[r])
-      return ← mkInfo (e.getArg! 0) r hwf (e.getArg! 3)
+      return ← mkInfo (e.getArg! 0) r hwf (e.getArg! 3) (if e.getAppNumArgs > 4 then some (e.getArg! 4) else none)
     match unfoldDepth, h with
     | d + 1, .const c lvls =>
       -- only the auxiliary definitions of `fn` itself (`fn._unary`, …), not other functions
-      unless fn.isPrefixOf c do
+      -- (in particular not the `where`/`let rec` helpers `fn.go` of a non-recursive `fn`)
+      unless c.getPrefix == fn && c.isInternal do
         throwError "#lean_wf_func_to_term: {fn} is not defined by well-founded recursion"
       let info ← getConstInfo c
       let some _ := info.value? (allowOpaque := true) |
@@ -251,12 +269,50 @@ def pullBackRel (gam dom r hwf : Lean.Expr) : MetaM (Lean.Expr × Lean.Expr) := 
   let pack ← withLocalDeclD `e envTy fun e => do mkLambdaFVars #[e] (← packE dom e)
   return (← mkAppM ``InvImage #[r, pack], ← mkAppM ``InvImage.wf #[pack, hwf])
 
+/-- Like `closedRel`, when the parameters packed into the fixpoint are those at the positions
+`vs` (in packing order) and the fixed parameters (all the others) are not a prefix: the
+relation `WFLang.fixedAtRel f g r`, where `f` reads the fixed components of an environment,
+`g` packs the others into Lean's domain `dom`, and `r k` is Lean's relation at the fixed
+values `k`. -/
+def closedRelAt (argTys : List Lean.Expr) (xs : Array Lean.Expr) (dom r hwf : Lean.Expr)
+    (vs : List Nat) : MetaM (Lean.Expr × Lean.Expr) := do
+  let fixedPos := (List.range xs.size).filter (!vs.contains ·)
+  let fixedXs := fixedPos.toArray.map (xs[·]!)
+  if dom.hasAnyFVar (fixedXs.contains <| mkFVar ·) then
+    throwError "#lean_wf_func_to_term: the domain of the fixpoint depends on a fixed parameter"
+  let gam := mkTyList argTys
+  let envTy := mkApp (mkConst ``WFLang.Env) gam
+  let kTys := mkTyList (fixedPos.map (argTys[·]!))
+  let kTy := mkApp (mkConst ``WFLang.Env) kTys
+  let proj (e : Lean.Expr) (i : Nat) : MetaM Lean.Expr := do
+    let mut v := e
+    for _ in [0:i] do v ← mkAppM ``Prod.snd #[v]
+    mkAppM ``Prod.fst #[v]
+  let tuple (e : Lean.Expr) (ps : List Nat) : MetaM Lean.Expr := do
+    let mut t := Lean.mkConst ``Unit.unit
+    for i in ps.reverse do t ← mkAppM ``Prod.mk #[← proj e i, t]
+    return t
+  let f ← withLocalDeclD `e envTy fun e => do mkLambdaFVars #[e] (← tuple e fixedPos)
+  let g ← withLocalDeclD `e envTy fun e => do mkLambdaFVars #[e] (← packE dom (← tuple e vs))
+  let (rK, hK) ← withLocalDeclD `k kTy fun k => do
+    let vals ← (List.range fixedPos.length).toArray.mapM (proj k)
+    let r' := r.replaceFVars fixedXs vals
+    let hwf' := hwf.replaceFVars fixedXs vals
+    return (← mkLambdaFVars #[k] r', ← mkLambdaFVars #[k] hwf')
+  let R := mkAppN (mkConst ``WFLang.fixedAtRel [← getLevel dom]) #[gam, kTy, dom, f, g, rK]
+  let wf := mkAppN (mkConst ``WFLang.fixedAtRel_wf [← getLevel dom])
+    #[gam, kTy, dom, f, g, rK, hK]
+  return (R, wf)
+
 /-- The well-founded relation of `fn` (found by `findFixIn fn xs`) as a *closed* relation on
 environments `Env argTys`, with its well-foundedness proof.  The fixed parameters become
 components that every related pair of environments shares (`WFLang.fixedRel`). -/
 def closedRel (argTys : List Lean.Expr) (xs : Array Lean.Expr) (info : FixInfo) :
     MetaM (Lean.Expr × Lean.Expr) := do
   let j := info.nFixed
+  if let some vs := info.varying then
+    if vs != (List.range (xs.size - j)).map (· + j) then
+      return ← closedRelAt argTys xs info.dom info.r info.hwf vs
   let (R0, wf0) ← pullBackRel (mkTyList (argTys.drop j)) info.dom info.r info.hwf
   let mut R := R0
   let mut wf := wf0
@@ -306,7 +362,7 @@ macro_rules
   | `(tactic| wf_dec) => `(tactic| (
       intro e g
       try simp [WFLang.PExprs.eval, WFLang.PExpr.eval, WFLang.Var.get, WFLang.BinOp.eval,
-        WFLang.Ty.beq, WFLang.fixedRel, InvImage] at g ⊢
+        WFLang.Ty.beq, WFLang.fixedRel, WFLang.fixedAtRel, InvImage] at g ⊢
       first
         | done
         | omega

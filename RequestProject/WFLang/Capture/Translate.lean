@@ -76,6 +76,10 @@ def unfoldStep? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
       return some (v.beta e.getAppArgs).headBeta
   return none
 
+/-- Inline every `let`/`have` of `e`. -/
+partial def zetaAll (e : Lean.Expr) : Lean.Expr :=
+  e.replace fun x => if x.isLet then some (zetaAll (x.letBody!.instantiate1 x.letValue!)) else none
+
 /-- The test of a two-way branch. -/
 inductive Test where
   /-- A decidable proposition (`if p then … else …`). -/
@@ -109,8 +113,10 @@ def branch? (e : Lean.Expr) (shortCircuit := true) :
   if e.isAppOfArity ``ite 5 then
     return some (.prop (e.getArg! 1), e.getArg! 3, e.getArg! 4)
   if e.isAppOfArity ``dite 5 then
-    let a := e.getArg! 3
-    let b := e.getArg! 4
+    -- `let`/`have` are inlined (as by `unfoldStep?`), so that a hypothesis `h` used only by a
+    -- `have` (e.g. a termination proof) disappears from the branches
+    let a := zetaAll (e.getArg! 3)
+    let b := zetaAll (e.getArg! 4)
     if a.isLambda && b.isLambda && !a.bindingBody!.hasLooseBVars &&
         !b.bindingBody!.hasLooseBVars then
       return some (.prop (e.getArg! 1), a.bindingBody!, b.bindingBody!)

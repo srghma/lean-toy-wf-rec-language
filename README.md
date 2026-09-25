@@ -27,7 +27,7 @@ theorem gcd_agree : ∀ m n, Term.eval gcd_term m n = gcd m n := by wf_agree
 * Well-founded recursion is part of the grammar:
   * `fix params r R wf body args k` is a local recursive function whose relation `R` is proved
     well-founded by `wf`;
-  * `call args dec k` is a recursive call carrying its own proof `dec` that the arguments are
+  * `fixSelfCall args dec k` is a recursive call carrying its own proof `dec` that the arguments are
     `R`-smaller. The proof may use the enclosing `if` tests, which are recorded in the type of
     the expression (the path condition).
 * `Expr.eval` is total: structural recursion on the syntax, and `WellFounded.fix` at `fix` nodes.
@@ -63,7 +63,7 @@ RequestProject/WFLang.lean          imports everything
 RequestProject/WFLang/
 ├── Core/Types.lean                 Ty, Env, Var, Sig, FnType, curryEnv, BinOp, fixedRel
 ├── Core/PExpr.lean                 call-free expressions PExpr / PExprs
-├── PCL/Lang.lean                   Expr (fix, call, ite, ret), eval, Term, soundness
+├── PCL/Lang.lean                   Expr (fix, fixSelfCall, ite, ret), eval, Term, soundness
 ├── PCL/Termination.lean            base-case existence, unbuildable loop
 ├── Capture/Meta.lean               reading a Lean function; tactics wf_dec, wf_close
 ├── Capture/Translate.lean          Lean term → PExpr syntax, branch recognition
@@ -77,8 +77,11 @@ RequestProject/WFLang/
     ├── More.lean                   their captures + agreement theorems
     ├── MoreChecks.lean             runtime checks, #expect_reject, rejections
     ├── SourceProofs.lean           the theorems of the uploaded files (+ hyperWhile = hyper)
-    └── Sources.lean                every uploaded function: captured or rejected (table),
+    ├── Sources.lean                every uploaded function: captured or rejected (table),
                                     derived agreement theorems, runtime checks
+    └── Gaps.lean                   coverage gaps: well-founded functions still rejected
+                                    (pinned by #guard_msgs), see GAPS.md
+GAPS.md                             which rejected functions could be supported, and how
 Bench.lean                          `lake exe wfbench <native|pcl> <m>`
 ```
 

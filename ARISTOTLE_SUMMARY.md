@@ -1,3 +1,103 @@
+# Summary of changes for run e2e72c9a-f076-4733-89dd-6aeab6e9131c
+To answer this I ran about 25 well-founded, structural and plain Lean functions through `#lean_wf_func_to_term`, rather than guessing from the code. They're all in `RequestProject/WFLang/Tests/Gaps.lean`, and each one's current result is pinned with `#guard_msgs`, so the build fails if support changes. `GAPS.md` has the full classification and a fix plan for each gap. Three of the failures were bugs, which I fixed; the rest are listed below.
+
+**Bugs found and fixed.** Each now has a `wf_agree` agreement theorem and runtime checks. The full project builds with no `sorry`, and all existing tests still pass.
+- **Fixed parameter that isn't the first one** (e.g. `def f (n k : Nat)` where `k` never changes): the capture failed with a spurious "failed to prove termination". Lean 4.28 moves such parameters in front of the recursion even when they aren't a prefix, but the capture assumed they were the first ones. It now works out which parameters change. There's a new relation `fixedAtRel` with a proof that it's well-founded (`fixedAtRel_wf`, no axioms).
+- **Non-recursive function with a recursive `where go` helper:** the capture worked, but `wf_agree` failed because it treated the function itself as recursive.
+- **`if h : … else have … := (proof using h); f …`:** this was rejected; the `have` is now inlined first, so `h` is no longer in the way.
+
+**Not supported, but the grammar already allows them (only the capture needs work):**
+- A call inside a branch of an `if` that isn't in tail position, e.g. `1 + (if c then f a else f b)`.
+- A call on the right of `&&` or `||` that isn't in tail position.
+- `match` on a `Bool`.
+- Literal patterns like `| 5 =>`.
+- `match h : e with`.
+
+For the last three I printed how Lean unfolds the `match` to confirm the fix plan.
+
+**Missing operators:**
+- **Translation only, no grammar change:** `Nat.pred`, `!=`/`bne`, `xor` on `Bool`, `min`/`max`, and `∣` (divides) in conditions.
+- **Need new operators in the grammar:** `^`, bit shifts and bitwise ops, and library functions such as `Nat.gcd`. Alternatively, recursive library functions could be captured the same way user callees already are.
+
+**Need a grammar extension:**
+- **Other types:** `Int`, pairs (e.g. `Nat × Nat` results), `List`, and subtype results. The subtype case is the substantial one: when a termination proof uses a property of a recursive call's result, `fix` needs to carry a postcondition.
+- **Higher-order code:** calls under a `fun`, bounded `for i in [a:b]` loops and `Nat.fold` could become a nested recursive definition when the loop body is known. The uploaded `iter`, `hyperLoop` and `ack2` could be handled by specialising them to the function passed at each call site.
+- **Mutual recursion:** could be encoded as a single recursive definition with a tag argument, using the relation Lean already builds.
+- **Proof preconditions** (like the uploaded `boom`): would need a program that carries a precondition.
+
+**Can't be supported:** `while` loops, `partial def` and `partial_fixpoint`. Lean defines these with no termination proof, so there's nothing to reuse unless they're first rewritten as well-founded recursion, as was done for `hyperWhile`.
+
+`README.md` now points to `GAPS.md` and the new test file.
+
+# Summary of changes for run 535c967c-9505-4806-8c4b-938f73da789c
+There is no `Tests/Functions.md` in the project, so I annotated `RequestProject/WFLang/Tests/Functions.lean`, which I took to be the file you meant. Every definition in it now has a `-- Recursion:` comment, and the file header has a new section explaining these comments. The file `Tests/MoreFunctions.lean` also exists; I didn't touch it.
+
+I didn't classify the functions by reading their syntax. For each one I checked what Lean actually recorded when it compiled the definition: whether it went through well-founded recursion (`WellFounded.fix`) or structural recursion (`Nat.brecOn`), and, for structural recursion, which argument it recurses on.
+
+**Well-founded:**
+- `gcd`: measure `n` (1 of 2 args).
+- `digitSum`: measure `n`, inferred by Lean since there's no `termination_by`.
+- `isPow2`: measure `n`.
+- `sumTo`: measure `i` (1 of 2 args).
+- `Tco.ack`: lexicographic `(m, n)` (both args).
+- `diagonal`: lexicographic `(m + n, m)` (both args).
+- `diagonal_tr`: lexicographic `(m + n, m)` (2 of 3 args; `acc` isn't in the measure).
+- `hyper`: lexicographic `(n, b)` (2 of 3 args).
+- `mc91Loop`: `2 * (111 - n) + 21 * c` (both args).
+- `boom`: measure `n` (1 of 2 args). The decrease proof only goes through because the `Safe n` hypothesis makes it vacuous.
+
+**Structural:** Lean's structural recursion is always on exactly one argument.
+- `ackInner`: on the `Nat` argument (`f` is fixed).
+- `ack2`: on `m`.
+- `hyperLoop`: on `b`.
+- `hyperTCO`: on `n`.
+- `hyperWhile`: on `n`, with the recursive call inside a `for` loop.
+- `iter`: on the counter `c`.
+
+**Non-recursive:**
+- **Plain functions, no loop:** `ack999`, `pair`, `unpairLeft`, `unpairRight`, `hyperBase`, `mc91`, `mc91TR`, `Safe`.
+- **`while` loops:** `ackWhile`, `isqrt`, `ackNoDataStructure`, `diagonalWhile`, `mc91While`. These use Lean's built-in loop combinator, which isn't checked for termination, so they are neither well-founded nor structural.
+
+Where it's useful, the comments also say whether a function is tail recursive, has nested recursive calls, or is higher-order. I added comments only; no code changed. The project still builds successfully, and the change is committed.
+
+# Summary of changes for run cddd1764-975b-48cb-a96b-b1cf1ba51385
+There are two separate stack overflows, and only the second is the evaluator's fault. The full write-up with measurements is in `STACK_OVERFLOW.md`.
+
+**1. The benchmark crashed before `main` ran, for any input, including native Lean (fixed).**
+- **Cause:** `Tests/Functions.lean` has the uploaded line `def ack999 := ack 999 1 -- DONT TRY TO EVALUATE`. Lean computes a compiled `def` with no arguments once, when the module is loaded. So every executable that imports this file (`wfbench` does) computed native `ack 999 1` at startup. That overflowed an 8 MB stack, or segfaulted after about 25 s with an unlimited stack.
+- **Fix:** I made `ack999` `noncomputable`. This doesn't change its meaning: `ack999_term` and `ack999_agree` still build. `wfbench native 1` now finishes in 1 ms.
+
+**2. The PCL evaluator itself: stack depth grows with every recursive call, including tail calls.**
+- **Which cases:** any run where the recursion goes deep, whether or not the calls are tail calls.
+  - **Fine:** `gcd`, `isPow2`, `digitSum`, `mc91Loop`, small `ack` / `hyper`.
+  - **Overflow:** `sumTo n` for large `n`, `diagonal_tr m 0 0` (about m²/2 nested calls), `diagonal`, and deep `ack` / `hyper`.
+- **Measured thresholds** (single runs, not a Lean proof):
+  - Compiled, 8 MB stack: works at about 45k nested calls, overflows at about 80k. That's roughly 100–130 bytes per call.
+  - Compiled, 64 MB stack: works at about 320k, overflows at about 500k.
+  - `#eval`: overflows after only about 2–3k calls (`sumTo 2000` works, `sumTo 2500` doesn't). It aborts the whole `lean` process with an uncaught "deep recursion" exception instead of reporting an error.
+  - Native Lean runs the same `diagonal_tr` with 4.5M calls in 5 ms, because it compiles it to a loop.
+- **Not non-termination:** with `lean --tstack=1000000`, `sumTo 20000` returns the correct result. The termination and soundness theorems are unaffected.
+- **Why:** in `Expr.eval`, the recursive-call case is `k.eval (h (args.eval e) (dec e g), e) g h`. The call `h …` is an argument to the rest of the program `k`, so it is never the last thing the evaluator does, even when the source function is tail-recursive. The capture turns `sumTo (i-1) (acc+i)` into `fixSelfCall args dec (ret (var here))`, i.e. "call, then return the result" (I checked this with `#print`). In the generated C, each call nests `Expr.eval` → closure call → `WellFounded.fixC` → `Expr.eval` on the body, and then has to come back to run `k`. The other cases (`ret`, `ite`, and the continuation of `fix`) already compile to loops. `WellFounded.fix` itself isn't the problem: Lean compiles it to a plain recursive function.
+
+**Possible fixes (not implemented):**
+- A larger stack only moves the limit.
+- A special case for tail calls wouldn't reliably give constant stack.
+- The real fix is an evaluator that keeps its own stack of pending work on the heap. It would need a new termination measure and a new proof that it agrees with `Expr.eval`, which is a substantial change to `Lang.lean`.
+
+`lake build` and `lake build wfbench` both succeed with no `sorry`, and the changes are committed.
+
+# Summary of changes for run 3089c052-44b7-4ff3-b615-6a2da11cb642
+I renamed the recursive-call constructor of the PCL language from `Expr.call` to `Expr.fixSelfCall`. `lake build` and `lake build wfbench` both succeed, and there is no `sorry` in the project.
+
+**Changes**
+- **`PCL/Lang.lean`:** the constructor is now `| fixSelfCall args dec k`. Its type and meaning are unchanged: `let v := self args in k`, carrying a proof `dec` that the arguments go down. I updated the evaluator case and the grammar in the header comment. The simp lemma for this case is renamed from `eval_call` to `eval_fixSelfCall`.
+- **`PCL/Termination.lean`:** updated the pattern in `firstCall`, the program in `loop_unbuildable`, and the comments.
+- **`Capture/Elab.lean`:** `#lean_wf_func_to_term` now produces `WFLang.PCL.Expr.fixSelfCall …` nodes.
+- **`WFLang.lean` and `README.md`:** updated the references to the constructor.
+- **Properties table:** updated the definition of `Expr` and the two entries that mention the constructor.
+
+Every captured program and every agreement theorem (e.g. `gcd_agree`) still checks unchanged.
+
 # Summary of changes for run ebcc0f51-6ff3-48bf-a7c2-d1436d664f80
 I removed the broken `ackWhile`. The corrected loop is now the only version and is called `Tco.ackWhile`. `lake build` succeeds with no errors, and there is no `sorry` in the project.
 

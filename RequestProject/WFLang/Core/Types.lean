@@ -130,4 +130,26 @@ theorem fixedRel_wf {t : Ty} {ts : List Ty} {R : t.denote → Env ts → Env ts 
     subst hb
     exact IH y hr
 
+/-- A relation on `Env Γ` whose *fixed parameters* may sit at any positions: `f` reads the
+fixed components, `g` packs the others.  Related environments agree on the fixed components,
+and their packed other components are related by `r k`, where `k` are the fixed values.  The
+capture elaborator uses it when Lean moved fixed parameters that are not a prefix of the
+parameter list (e.g. `def f (n k : Nat)` with `k` fixed) outside the `WellFounded.fix`. -/
+def fixedAtRel {Γ : List Ty} {K : Type} {D : Sort _} (f : Env Γ → K) (g : Env Γ → D)
+    (r : K → D → D → Prop) : Env Γ → Env Γ → Prop :=
+  fun x y => f x = f y ∧ r (f y) (g x) (g y)
+
+theorem fixedAtRel_wf {Γ : List Ty} {K : Type} {D : Sort _} {f : Env Γ → K} {g : Env Γ → D}
+    {r : K → D → D → Prop} (h : ∀ k, WellFounded (r k)) : WellFounded (fixedAtRel f g r) := by
+  refine ⟨fun x => ?_⟩
+  suffices H : ∀ k d, ∀ x, f x = k → g x = d → Acc (fixedAtRel f g r) x from H _ _ x rfl rfl
+  intro k d
+  induction d using (h k).induction with
+  | _ d IH =>
+    intro x hf hg
+    refine Acc.intro _ fun y hy => ?_
+    obtain ⟨hfy, hr⟩ := hy
+    subst hf hg
+    exact IH (g y) hr y hfy rfl
+
 end WFLang

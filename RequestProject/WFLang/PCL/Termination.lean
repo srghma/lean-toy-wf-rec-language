@@ -14,12 +14,12 @@ rules.  `firstCall body x` is the argument tuple of the first recursive call tha
 makes when run on `x`, or `none` if the body returns without calling itself (a base case).
 
 * `firstCall_dec`: the first call always goes `R`-down (this is what the `dec` proof on the
-  `call` node says).
+  `fixSelfCall` node says).
 * `fix_body_reaches_base`: from any starting argument `x`, following first calls reaches, after
   finitely many `R`-steps, an argument on which the body returns without a recursive call.
 * `fix_body_has_base_case`: in particular every `fix` body has a base case.
 * `loop_unbuildable`: the non-terminating program `f x = f x` cannot be written, because the
-  decrease proof its `call` node needs does not exist for a well-founded `R`.
+  decrease proof its `fixSelfCall` node needs does not exist for a well-founded `R`.
 -/
 
 namespace WFLang.PCL
@@ -33,7 +33,7 @@ def Expr.firstCall : {Γ : List Ty} → {G : Env Γ → Prop} → {sf : Self Γ}
   | _, _, _, _, .ite c a b, e, g =>
       if hc : c.eval e = true then a.firstCall e ⟨g, hc⟩
       else b.firstCall e ⟨g, Bool.eq_false_iff.mpr hc⟩
-  | _, _, _, _, .call args dec _, e, g => some ⟨args.eval e, dec e g⟩
+  | _, _, _, _, .fixSelfCall args dec _, e, g => some ⟨args.eval e, dec e g⟩
   | _, _, _, _, .fix _ _ _ wf body args k, e, g =>
       k.firstCall (fixFn wf body (args.eval e), e) g
 
@@ -73,7 +73,7 @@ theorem loop_unbuildable {params : List Ty} (R : Env params → Env params → P
     (dec : ∀ e : Env params, True → (Self.top params .nat R).R
         ((PExprs.ids params).eval e) ((Self.top params .nat R).cur e)) : False := by
   obtain ⟨z, hz⟩ := fix_body_has_base_case wf
-    (Expr.call (PExprs.ids params) dec (.ret (.var .here))) x
+    (Expr.fixSelfCall (PExprs.ids params) dec (.ret (.var .here))) x
   rw [Expr.firstCall] at hz
   cases hz
 

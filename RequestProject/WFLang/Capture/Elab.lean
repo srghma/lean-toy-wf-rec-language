@@ -19,7 +19,7 @@ as *surface syntax* of `PCL.Expr`, which Lean then elaborates against the expect
 
 * control flow (`if`, `match` on `Nat`, `Nat.casesOn`, `&&`/`||` with a call on the right)
   becomes `Expr.ite`, so each branch records its test in the path condition;
-* every recursive call is lifted out (A-normal form) into `Expr.call args (by wf_dec …) k`;
+* every recursive call is lifted out (A-normal form) into `Expr.fixSelfCall args (by wf_dec …) k`;
 * the relation and its well-foundedness proof are the ones Lean built for `f`
   (from `WellFounded.fix`), pulled back along the packing of the arguments;
 * each `by wf_dec …` proves that one call goes down, from the path condition, using the
@@ -53,7 +53,7 @@ partial def lift (c : Ctx) (e : Lean.Expr) (k : Ctx → Lean.Expr → TermElabM 
       let retTy ← inferType e
       withLocalDeclD `r retTy fun v => do
         let rest ← k { c with vars := v.fvarId! :: c.vars } v
-        `(WFLang.PCL.Expr.call $(← pargs c args) $(← decStx c) $rest)
+        `(WFLang.PCL.Expr.fixSelfCall $(← pargs c args) $(← decStx c) $rest)
   -- a call of another recursive function: a nested `fix` node
   if let some head := calleeCall? c e then
     return ← liftMany c e.getAppArgs.toList [] fun c args => do

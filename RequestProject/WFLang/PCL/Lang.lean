@@ -7,7 +7,7 @@ In this language well-founded recursion is a constructor of `Expr` itself:
 
 ```
 | fix params r R wf body args k      -- let v := (fix self params. body) args in k
-| call args dec k                    -- let v := self args in k    (inside a fix body)
+| fixSelfCall args dec k             -- let v := self args in k    (inside a fix body)
 ```
 
 * `fix` carries the relation `R` and `wf : WellFounded R` (a `Prop`).
@@ -26,7 +26,7 @@ code generation: the evaluator never checks anything at runtime and has no fuel.
 
 namespace WFLang.PCL
 
-/-! ## Statements, with `fix` and `call` -/
+/-! ## Statements, with `fix` and `fixSelfCall` -/
 
 /-- The innermost enclosing recursive function: its parameters, result type, well-founded
 relation, and how to read its current parameters from the environment. -/
@@ -56,7 +56,7 @@ inductive Expr : (Γ : List Ty) → (Env Γ → Prop) → Option (Self Γ) → T
       (a : Expr Γ (fun e => G e ∧ c.eval e = true) sf t)
       (b : Expr Γ (fun e => G e ∧ c.eval e = false) sf t) : Expr Γ G sf t
   /-- `let v := self args in k`, with the proof that the call goes down. -/
-  | call {Γ : List Ty} {G : Env Γ → Prop} {sf : Self Γ} {t : Ty}
+  | fixSelfCall {Γ : List Ty} {G : Env Γ → Prop} {sf : Self Γ} {t : Ty}
       (args : PExprs Γ sf.params)
       (dec : ∀ e, G e → sf.R (args.eval e) (sf.cur e))
       (k : Expr (sf.ret :: Γ) (fun e => G e.2) (some (sf.push sf.ret)) t) : Expr Γ G (some sf) t
@@ -90,7 +90,7 @@ def Expr.eval : {Γ : List Ty} → {G : Env Γ → Prop} → {sf : Option (Self 
   | _, _, _, _, .ite c a b, e, g, h =>
       if hc : c.eval e = true then a.eval e ⟨g, hc⟩ h
       else b.eval e ⟨g, Bool.eq_false_iff.mpr hc⟩ h
-  | _, _, _, _, .call args dec k, e, g, h =>
+  | _, _, _, _, .fixSelfCall args dec k, e, g, h =>
       k.eval (h (args.eval e) (dec e g), e) g h
   | _, _, _, _, .fix _ _ _ wf body args k, e, g, h =>
       k.eval (wf.fix (fun x ih => body.eval x trivial ih) (args.eval e), e) g (Handler.push h)
@@ -167,10 +167,10 @@ theorem Term.eval_fix_eq {s : Sig} (R : Env s.args → Env s.args → Prop) (wf 
       if hc : c.eval e = true then a.eval e ⟨g, hc⟩ h
       else b.eval e ⟨g, Bool.eq_false_iff.mpr hc⟩ h := rfl
 
-@[simp] theorem eval_call {Γ : List Ty} {G : Env Γ → Prop} {sf : Self Γ} {t : Ty}
+@[simp] theorem eval_fixSelfCall {Γ : List Ty} {G : Env Γ → Prop} {sf : Self Γ} {t : Ty}
     (args : PExprs Γ sf.params) (dec : ∀ e, G e → sf.R (args.eval e) (sf.cur e))
     (k : Expr (sf.ret :: Γ) (fun e => G e.2) (some (sf.push sf.ret)) t)
     (e : Env Γ) (g : G e) (h : Handler (some sf) e) :
-    (Expr.call args dec k).eval e g h = k.eval (h (args.eval e) (dec e g), e) g h := rfl
+    (Expr.fixSelfCall args dec k).eval e g h = k.eval (h (args.eval e) (dec e g), e) g h := rfl
 
 end WFLang.PCL
