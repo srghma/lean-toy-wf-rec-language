@@ -1,15 +1,34 @@
 name = "WFLang"
-defaultTargets = ["WFLang"]
+version = "0.1.0"
+defaultTargets = ["WFLang", "NonEmpty", "TyTests", "TermTests"]
 
 [[require]]
 name = "mathlib"
-git = "https://github.com/leanprover-community/mathlib4.git"
+scope = "leanprover-community"
+rev = "v4.34.0"
+
+[[require]]
+name = "batteries"
+scope = "leanprover-community"
+rev = "v4.34.0"
+
+[[require]]
+name = "aesop"
+scope = "leanprover-community"
 rev = "v4.34.0"
 
 [[lean_lib]]
 name = "WFLang"
 globs = ["WFLang.+"]
 
-[[lean_exe]]
-name = "wfbench"
-root = "Bench"
+[[lean_lib]]
+name = "NonEmpty"
+globs = ["NonEmpty.+"]
+
+# [[lean_lib]]
+# name = "TyTests"
+# globs = ["TyTests.+"]
+#
+# [[lean_lib]]
+# name = "TermTests"
+# globs = ["TermTests.+"]
