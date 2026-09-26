@@ -4,7 +4,7 @@ import RequestProject.WFLang.Capture.Translate
 /-!
 # Helpers of the translation into `PCL` statements
 
-Tests on Lean terms (`isControl`, `tailRecOnly`, `loopableSig`), the classification of the
+Tests on Lean terms (`isControl`, `tailRecOnly`, `loopableSig`, `shareLet?`), the classification of the
 callees of a function (`calleeKinds`, `calleeKey`), join-point indices (`jvarStx`, `jvarAt`),
 tuples of loop states (`mkTuple`, `tupleProjs`) and small syntax builders used by
 `Capture/Stmt.lean`.
@@ -15,6 +15,46 @@ namespace WFLang.Capture
 open Lean Meta Elab Term
 open WFLang.Meta
 open WFLang.Translate
+
+/-- The number of occurrences of the loose bound variable `i` in `e`, outside the types of
+binders (an estimate of the number of uses of a `let` variable). -/
+partial def bvarUses (e : Lean.Expr) (i : Nat) : Nat :=
+  match e with
+  | .bvar j => if i == j then 1 else 0
+  | .app f a => bvarUses f i + bvarUses a i
+  | .lam _ _ b _ => bvarUses b (i + 1)
+  | .forallE _ _ b _ => bvarUses b (i + 1)
+  | .letE _ _ v b _ => bvarUses v i + bvarUses b (i + 1)
+  | .mdata _ b => bvarUses b i
+  | .proj _ _ b => bvarUses b i
+  | _ => 0
+
+/-- A Lean `let x := v; b` to capture as a **pure `let`** (`Expr.plet`, sharing): the value
+`v` is call-free, of an object type, not atomic once simplified (`PExpr.isShareable`: a
+variable or a literal is substituted), and `x` occurs at least twice in `b`.  Returns the name,
+the type, the value, the simplified value and the body. -/
+def shareLet? (c : Ctx) (e : Lean.Expr) :
+    MetaM (Option (Name × Lean.Expr × Lean.Expr × PE × Lean.Expr)) := do
+  let .letE n ty v b _ := e | return none
+  unless wfLang.shareLets.get (← getOptions) do return none
+  if hasCall c v || bvarUses b 0 < 2 then return none
+  if (← isProp ty) || (← isProof v) then return none
+  try
+    discard <| tyOf ty
+    let pe ← pexprE c v
+    match pe with
+    | .var _ | .lit _ | .raw _ => return none
+    | _ => return some (n, ty, v, pe, b)
+  catch _ => return none
+
+/-- The pure `let` statement `let x := v in ⟦b⟧` (`Expr.plet`): `x` becomes a new variable of
+the program (a `let` variable of the local context, so that the translation of `b` may still
+see its value), and the rest `b` is translated by `cont`. -/
+def pletStx (c : Ctx) (n : Name) (ty v : Lean.Expr) (pe : PE) (b : Lean.Expr)
+    (cont : Ctx → Lean.Expr → TermElabM Stx) : TermElabM Stx :=
+  withLetDecl n ty v fun x => do
+    let rest ← cont { c with vars := x.fvarId! :: c.vars } (b.instantiate1 x)
+    `(WFLang.PCL.Expr.plet $(← tyStx ty) $(← pe.render) (by decide) $rest)
 
 /-- Is `e` a control-flow node whose branches must not be evaluated eagerly? -/
 def isControl (e : Lean.Expr) : MetaM Bool := do

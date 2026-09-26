@@ -40,6 +40,11 @@ proved by `wf_agree` and checked on sample inputs by `#guard`:
 | `return` inside Lean's `while` (`findDiv`) | the loop state holds an `Option` | `Tests/LeanWhile.lean` |
 | mutual recursion with different parameter or result types (`mA`/`mB`, `rA`/`rB`) | padded parameters after the tag; a tuple of results | `Tests/MutualSignatures.lean` |
 | a decrease that Lean proves but the capture could not re-prove after translation (`nestMin`) | the decrease tactic splits the `if`s of the translated goal and calls `omega` | `Tests/MutualSignatures.lean` |
+| other library functions with a function argument: `List.zipWith`, `List.partition`, `List.countP`, `Array.foldl`, `Array.foldr`, `Array.map`, `Array.any`, `Array.all`, `Array.contains` | first-order recursive functions in `Core/MoreCombinators.lean` (or `Core/ListLoops.lean`), specialised to the function argument, including recursion inside `Array.map` (`arrRec`) | `Tests/MoreCombinators.lean` |
+| `for x in a` over an array (also with `break` / `return`) | the loop over `a.toList` | `Tests/MoreCombinators.lean` |
+| a recursive call inside a combinator other than `List.map` whose decrease needs the membership proof of `attach` (`depthSum`) | a new grammar statement `foldl` whose body runs under the path condition `x ∈ l`; `l.attach.any` / `all` and `for h : x in l` / `for ⟨x, h⟩ in l.attach` loops whose body always continues are rewritten into it | `Tests/AttachCombinators.lean` |
+| sharing: a call-free `let` used twice was substituted and computed twice (`let x := n * n; x + x`) | a pure `let` statement `plet` (the rest knows `v = p`), used by the capture for call-free `let`s whose variable occurs at least twice | `Tests/Sharing.lean` |
+| `partial_fixpoint` (`pfix`) | the capture tries candidate measures (a `Nat` parameter, the length of a `List` parameter, the difference of two `Nat` parameters) and keeps the first under which every recursive call decreases; `set_option wfLang.pfixMeasure k` picks one | `Tests/PartialFixpoint.lean` |
 
 ## 1. What the approach does not prove
 
@@ -85,14 +90,17 @@ operators and overflow semantics.
 The capture reads the definitions of user functions. Library functions are translated only if they
 map to one of the `PCL` operators (arithmetic, comparisons, bitwise, `gcd`, `lcm`, `log2`, `Int`
 arithmetic, pairs, list, option, sum, `Except`, string, character and array operations), to
-`List.map` (a statement of the grammar), or to one of the first-order combinators of
-`Core/ListLoops.lean` (`foldl`, `foldr`, `any`, `all`, `contains`, `elem`, `find?`, `filter`,
-`for x in l`, bounded quantifiers). Any other library call is `unsupported expression`.
+`List.map` or `l.attach.foldl` (statements of the grammar), or to one of the first-order
+combinators of `Core/ListLoops.lean` and `Core/MoreCombinators.lean` (`foldl`, `foldr`, `any`,
+`all`, `contains`, `elem`, `find?`, `filter`, `zipWith`, `partition`, `countP`, the `Array`
+versions of `foldl`, `foldr`, `map`, `any`, `all`, `contains`, `for x in l` and `for x in a`,
+bounded quantifiers). Any other library call is `unsupported expression`.
 
 | not supported | example | evidence |
 |---|---|---|
-| other library functions with a function argument (`List.zipWith`, `List.partition`, `Array.foldl`, `Array.map`, …) | – | by reading the code |
-| a recursive call inside a combinator other than `List.map` whose decrease needs the membership proof of `attach` | `depthSum` (`(List.range n).attach.foldl (fun acc ⟨i, h⟩ => acc + depthSum i) 1`) | [pinned] (rejection only: the capture fails with an internal error) |
+| other library functions with a function argument (`List.filterMap`, `List.foldlM`, `Array.filter`, `Array.foldl` over a subrange, …) | – | by reading the code |
+| a loop that uses its membership proof (`for h : x in l`) and may stop early (`break`, `return`) | `forMemRet` | [pinned] (rejection only) |
+| `l.attach.foldr`, `l.attach.filter`, … and `for h : x in a` over an array: only `map`, `foldl`, `any`, `all` and `for` over `l.attach` of a list keep `x ∈ l` | – | by reading the code |
 | `for` loops in a monad other than `Id` | – | by reading the code |
 | a function parameter with no known argument | `#lean_wf_func_to_term Tco.iter` | [pinned] (`Tests/Sources.lean`) |
 
@@ -107,7 +115,7 @@ be under another binder.
 |---|---|---|
 | Lean's own `while` in a recursive function, or without a provable measure | `LeanWhileRejected.recLoop`, `Tco.ackWhile`, `Tco.ackNoDataStructure` | [pinned] (`Tests/LeanWhile.lean`, `Tests/Sources.lean`) |
 | `partial def` | | [documented] |
-| `partial_fixpoint` | `pfix` → `recursive call … outside its definition` | [pinned] |
+| `partial_fixpoint` with no candidate measure that decreases (non-terminating, or needing a measure other than a parameter, a list length or a difference of two parameters) | `loopUp` | [pinned] (rejection only) |
 | mutually recursive functions with proof parameters or subtype results | – | by reading the code (`fnSig`) |
 | a call inside the test or body of a well-founded `wf_while` loop | `WhileEx.callInBody` | [pinned] (`Tests/While.lean`) |
 | a termination proof that needs the *value* of a helper that is not `@[inlinable]` | `GlobalsEx.logHalfG` | [documented] (`Tests/Globals.lean`) |
@@ -115,8 +123,10 @@ be under another binder.
 Details:
 
 * **Non-well-founded definitions.** Lean builds `partial` and `partial_fixpoint` without
-  a termination proof that can be reused, and the evaluator of `PCL` is total, so there is
-  nothing to translate. The workaround is to rewrite the loop with `wf_while … termination_by μ`
+  a termination proof that can be reused, and the evaluator of `PCL` is total. A `partial def`
+  is opaque (its body cannot be read), so there is nothing to translate. A `partial_fixpoint`
+  definition has an equation `f.eq_def`, and is captured when one of the candidate measures
+  works (§0); otherwise it is rejected. The workaround is to rewrite the loop with `wf_while … termination_by μ`
   or `WFLang.whileWF` (`Core/While.lean`), as `Tests/WhileFunctions.lean` does for
   `diagonalWhile`, `mc91While` and Newton's `isqrt`, or as well-founded recursion.
   `ackWhile` / `ackNoDataStructure` would need a measure on the stack (a multiset order) and have
@@ -137,10 +147,12 @@ Details:
   `Expr.eval` and substituted for it by `@[csimp]` lemmas: loop iterations and tail calls
   (`let v := self args in ret v`) run as jumps and use no stack.  Non-tail recursive calls
   (`ack`, `hyper`, `diagonal`) still use one stack segment per nested call.
-* **No sharing** ([documented], `GRAMMAR.md`). A Lean `let` with a call-free value is substituted,
-  so a value used twice is computed twice. For example, `let x := n * n; x + x` is accepted and
-  evaluates `n * n` twice. A pure `let` statement would fix this; it is listed as a possible next
-  step, not implemented.
+* **Sharing only through `let`** (by reading the code). A call-free Lean `let` whose variable is
+  used at least twice is captured as a pure `let` (`plet`), so its value is computed once
+  (§0). A subexpression written twice *without* a `let` (`n * n + n * n`) is still computed
+  twice: there is no common subexpression elimination. The number of uses is counted
+  syntactically, so a `let` whose variable occurs twice but only once on each path (e.g. once
+  in each branch of an `if`) is still bound, which costs nothing but gains nothing.
 * **Inlined loops are per call site** ([documented], `Tests/Loops.lean`). A tail-recursive
   `@[inlinable]` helper called twice gives two loops, as inlining does. Recursive helpers with
   non-tail self calls are shared as global functions (the local-function context was removed,
@@ -155,7 +167,9 @@ Details:
   a slow closed call (a large Ackermann value) makes the capture slow. Turn this off with
   `set_option wfLang.foldCalls false`.
 * **Constant folding does not regroup:** `a + 9 + 10` stays as it is and is not simplified to
-  `a + 19`.
+  `a + 19`. (Regrouping `(x + c₁) + c₂` in the optimiser was tried in this round and reverted:
+  it broke the agreement proof of an existing test, `Tests/Basic.lean`, whose `simp` normal form
+  keeps the original grouping.)
 * **Join points are not used after a call with a subtype result.** The rest of the computation is
   copied into both branches instead, which can blow up exponentially with several such `if`s in a
   row. `GRAMMAR.md` sketches how to lift this.
@@ -166,12 +180,12 @@ Details:
 
 Ordered by how many ordinary Lean functions each item would unlock, as a judgement call:
 
+(The former items 2 and 3, `attach` proofs beyond `List.map` and more combinators, are done:
+see §0.)
+
 1. **User structures**, encoded as tuples, with an encoding function in the agreement statement.
-2. **Erasing `attach` proofs for all combinators**, not only `List.map`, so that recursion over
-   the elements of a list can use `x ∈ l` in its termination proof.
-3. **More combinators** (`zipWith`, `partition`, `Array.foldl`/`map`, …) through the same
-   first-order-function pattern as `Core/ListLoops.lean`.
-4. **An explicit-stack evaluator for non-tail calls** (loops and tail calls already run in
+2. **Loops with early exit that use `x ∈ l`**: a `foldl`-like statement whose body may stop.
+3. **An explicit-stack evaluator for non-tail calls** (loops and tail calls already run in
    constant stack), or compiling programs to closures to cut the interpretive overhead.
-5. **General user inductive types**: the largest change, touching `Ty`, `PExpr`, the translation
+4. **General user inductive types**: the largest change, touching `Ty`, `PExpr`, the translation
    and `wf_agree`.

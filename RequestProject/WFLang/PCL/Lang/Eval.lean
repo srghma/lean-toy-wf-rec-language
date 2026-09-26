@@ -50,6 +50,9 @@ def Expr.eval {GL : List Fn} (ge : FEnv GL) : {Γ : List Ty} → {G : Env Γ →
       let v := i.get ge (args.eval e) (hpre e g)
       let r := k.eval ge (v.1, e) ⟨g, v.2⟩ (Handler.push h) je
       ⟨r.1, r.2⟩
+  | _, _, _, _, _, _, .plet _ p _ k, e, g, h, je =>
+      let r := k.eval ge (p.eval e, e) ⟨g, rfl⟩ (Handler.push h) je
+      ⟨r.1, r.2⟩
   | _, _, _, _, _, _, .map _ _ l _ body k, e, g, h, je =>
       let vs := (l.eval e).attach.map fun x => (body.eval ge (x.1, e) ⟨g, x.2⟩ (Handler.push h) ()).1
       let r := k.eval ge (vs, e) g (Handler.push h) je

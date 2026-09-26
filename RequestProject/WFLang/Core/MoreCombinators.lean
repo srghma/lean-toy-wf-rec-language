@@ -90,3 +90,50 @@ attribute [wflang_eval ↓ high] zipWith_eq_listZipWith partition_eq_listFilter 
   array_all_eq_listAll array_contains_eq_listAny
 
 end WFLang
+
+/-! ## Combinators over `l.attach`
+
+A fold over `l.attach` is a `foldl` statement of the grammar, whose body knows `x ∈ l` (the
+membership proofs are erased).  `any` and `all` over `l.attach` are captured as such folds. -/
+
+namespace WFLang
+
+theorem any_eq_foldl {α : Type} (l : List α) (p : α → Bool) :
+    l.any p = l.foldl (fun acc x => acc || p x) false := by
+  suffices h : ∀ b, l.foldl (fun acc x => acc || p x) b = (b || l.any p) by rw [h]; simp
+  induction l with
+  | nil => intro b; simp
+  | cons x xs ih => intro b; rw [List.foldl_cons, ih, List.any_cons, Bool.or_assoc]
+
+theorem all_eq_foldl {α : Type} (l : List α) (p : α → Bool) :
+    l.all p = l.foldl (fun acc x => acc && p x) true := by
+  suffices h : ∀ b, l.foldl (fun acc x => acc && p x) b = (b && l.all p) by rw [h]; simp
+  induction l with
+  | nil => intro b; simp
+  | cons x xs ih => intro b; rw [List.foldl_cons, ih, List.all_cons, Bool.and_assoc]
+
+theorem any_attach_eq_foldl {α : Type} (l : List α) (p : {x // x ∈ l} → Bool) :
+    l.attach.any p = l.attach.foldl (fun acc x => acc || p x) false := any_eq_foldl _ _
+
+theorem all_attach_eq_foldl {α : Type} (l : List α) (p : {x // x ∈ l} → Bool) :
+    l.attach.all p = l.attach.foldl (fun acc x => acc && p x) true := all_eq_foldl _ _
+
+attribute [wflang_eval ↓ 20000] any_attach_eq_foldl all_attach_eq_foldl
+
+end WFLang
+
+/-! ## `for x in a` over an array
+
+The capture turns a loop over an array into the loop over `a.toList` (`Capture/Meta/Calls.lean`,
+`normLoops`); the agreement proof uses this equation (a loop that may stop early). -/
+
+namespace WFLang
+
+theorem forIn_array_eq_listLoopN {α β : Type} (a : Array α) (init : β)
+    (f : α → β → Id (ForInStep β)) :
+    forIn a init f = pure (listLoopN (fun x b => (f x b).run) a.toList init) := by
+  rw [← Array.forIn_toList, forIn_eq_listLoopN]
+
+attribute [wflang_eval low] forIn_array_eq_listLoopN
+
+end WFLang

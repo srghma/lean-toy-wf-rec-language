@@ -73,6 +73,8 @@ def Expr.firstCall {GL : List Fn} (ge : FEnv GL) : {Γ : List Ty} → {G : Env �
   | _, _, _, _, _, _, .gCall i args _ hpre k, e, g, h, jf =>
       k.firstCall ge ((i.get ge (args.eval e) (hpre e g)).1, e)
         ⟨g, (i.get ge (args.eval e) (hpre e g)).2⟩ (Handler.push h) jf
+  | _, _, _, _, _, _, .plet _ p _ k, e, g, h, jf =>
+      k.firstCall ge (p.eval e, e) ⟨g, rfl⟩ (Handler.push h) jf
   | _, _, _, _, _, _, .map _ _ l _ body k, e, g, h, jf =>
       ((l.eval e).attach.findSome? fun x =>
           body.firstCall ge (x.1, e) ⟨g, x.2⟩ (Handler.push h) ()).or

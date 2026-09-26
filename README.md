@@ -39,6 +39,7 @@ theorem gcd_agree : ∀ m n, Term.eval gcd_term m n = gcd m n := by wf_agree
   | ite c hc a b                           -- if-then-else, tail position only
   | fixSelfCall args ha dec hpre k         -- let v := self args in k   (recursive call)
   | gCall g args ha hpre k                 -- let v := g args in k      (global function g)
+  | plet s p hp k                          -- let v := p in k           (pure let: sharing)
   | map s u l hl body k                    -- let v := List.map (fun x => body) l in k
   | join s P body m                        -- join j (v : s) := body in m, tail position only
   | joinrec s P R wf body m                -- joinrec j (x : s) [R] := body in m  (a loop)
@@ -73,6 +74,13 @@ theorem gcd_agree : ∀ m n, Term.eval gcd_term m n = gcd m n := by wf_agree
   arguments are `R`-smaller. That proof may use the enclosing `if` tests, the precondition and
   the postconditions of earlier calls, which are recorded in the type of the statement (the path
   condition).
+* **Pure `let`** (`Expr.plet`, sharing): `let v := p in k` computes the call-free value `p`
+  once and binds it to a new variable, which `k` may use any number of times. The path
+  condition of `k` contains `v = p`, so decrease proofs and postconditions see the value. The
+  value must be in normal form and not a variable or a literal (`PExpr.isShareable`). The
+  capture turns a Lean `let x := v; b` into `plet` when `v` is call-free, not atomic once
+  simplified, and `x` occurs at least twice in `b`; other call-free `let`s are substituted
+  (`set_option wfLang.shareLets false` substitutes all of them). `Tests/Sharing.lean`.
 * **`map`** (`Expr.map`): `let v := List.map (fun x => body) l in k`. The body is a statement
   over one more variable `x`; it may make calls, recursive calls included, and its path condition
   contains `x ∈ l`, which its decrease proofs may use. The evaluator supplies the membership
@@ -124,6 +132,9 @@ The capture supports:
   both branches instead only when a call in scope has a postcondition, or with
   `set_option wfLang.joinPoints false`);
 * fixed parameters and structural recursion;
+* `let`: a `let` whose value calls is evaluated once, before its body; a call-free `let` whose
+  variable is used at least twice (and whose value is not a variable or a constant) becomes a
+  pure `let` (`plet`, sharing); other call-free `let`s are substituted;
 * calls to other functions, according to the attribute `@[inlinable]`:
   * `@[inlinable]` functions are inlined: a non-recursive one is replaced by its body, a
     **tail-recursive** one becomes a **loop inside the caller**
@@ -210,6 +221,16 @@ The capture supports:
   `∃ x ∈ l, P x`, … under `decide` or in the test of an `if` (`Tests/ListCombinators.lean`);
 * decrease obligations that Lean's proof no longer closes after translation (e.g. `min`
   turned into an `if`) are retried by splitting the `if`s and calling `omega` (`nestMin`).
+* more combinators with a function argument: `List.zipWith`, `List.partition`, `List.countP`,
+  `Array.foldl`, `Array.foldr`, `Array.map`, `Array.any`, `Array.all`, `Array.contains`, and
+  `for x in a` over an array, also with `break`/`return` (`Tests/MoreCombinators.lean`);
+* recursive calls whose decrease needs the membership proof of `attach`, beyond `List.map`:
+  `l.attach.foldl`, `l.attach.any`, `l.attach.all`, and `for h : x in l` / `for ⟨x, h⟩ in
+  l.attach` loops whose body always continues, through the grammar statement `foldl` whose body
+  knows `x ∈ l` (`Tests/AttachCombinators.lean`: `depthSum`, `forMem`);
+* `partial_fixpoint` definitions, when the value of a `Nat` parameter, the length of a `List`
+  parameter, or the difference of two `Nat` parameters decreases at every recursive call; the
+  agreement theorem then also shows the function is total (`Tests/PartialFixpoint.lean`).
 
 `GAPS.md` lists what is still rejected (e.g. Lean `while` loops without a provable measure or
 inside a recursive function, and calls inside the body of a `wf_while`).
@@ -301,10 +322,11 @@ RequestProject/WFLang/
 ├── Core/PExpr.lean                 call-free expressions PExpr / PExprs
 ├── Core/PExprMap.lean              renaming (functor laws) and traversal (traversable laws) of
 │                                   PExpr / PExprs; Inhabited / IsEmpty instances
-├── Core/Normal.lean                optimised normal form: PExpr.isNF, PExpr.isCond
+├── Core/Normal.lean                optimised normal form: PExpr.isNF, PExpr.isCond,
+│                                   PExpr.isShareable (values of pure `let`s)
 ├── PCL/Lang.lean                   the language (imports PCL/Lang/*):
 │   ├── Lang/Syntax.lean            global functions, join points, Expr (ret, ite, fixSelfCall,
-│   │                               gCall, map, join, joinrec, jump)
+│   │                               gCall, plet, map, foldl, join, joinrec, jump)
 │   ├── Lang/Eval.lean              eval (reference semantics), soundness of loops (joinFn)
 │   ├── Lang/Machine.lean           the jump machine evalS (loops, tail calls in constant stack),
 │   │                               its proof of agreement with eval, csimp
@@ -312,7 +334,8 @@ RequestProject/WFLang/
 │   ├── Lang/While.lean             whileLoop (derived form) and eval_whileLoop
 │   ├── Lang/Program.lean           Globals, PTerm/Term, Term.ofFix, tuples
 │   └── Lang/Simp.lean              simp lemmas used by the capture tactics
-├── PCL/Size.lean                   size measures (nodes, joins, loops, global calls, maps, globals)
+├── PCL/Size.lean                   size measures (nodes, joins, loops, global calls, maps,
+│                                   pure lets, expression nodes, globals)
 ├── PCL/Termination.lean            base-case existence, unbuildable loops
 ├── Capture/Meta.lean               reading a Lean function (imports Capture/Meta/*):
 │   ├── Meta/Signature.lean         object types, signatures, specialised references (FnRef)
@@ -375,6 +398,13 @@ RequestProject/WFLang/
     ├── ListCombinators.lean        list combinators, bounded quantifiers, `for` with
     │                               break / return / step: captures + agreement theorems
     ├── MutualSignatures.lean       mutual recursion with different signatures; nestMin
+    ├── MoreCombinators.lean        zipWith, partition, countP, Array combinators, `for` over
+    │                               arrays: captures + agreement theorems
+    ├── AttachCombinators.lean      recursion under `l.attach.foldl` / `any` / `all` and
+    │                               `for h : x in l` (the `foldl` statement)
+    ├── PartialFixpoint.lean        `partial_fixpoint` definitions with a guessed measure
+    ├── Sharing.lean                pure `let` (sharing): captures + agreement theorems, counts
+    │                               with and without sharing, hand-written programs
     └── Unsupported.lean            what is still rejected (pinned), see UNSUPPORTED.md
 GAPS.md                             what is supported, how, and what is left
 GRAMMAR.md                          grammar layers: why join points, why no Atom layer

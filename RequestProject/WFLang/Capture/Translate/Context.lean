@@ -4,7 +4,7 @@ import RequestProject.WFLang.Core.PExpr
 /-!
 # Translating Lean terms into `PCL` surface syntax: the translation context
 
-The option `wfLang.joinPoints`, the information the translation keeps about the captured
+The options `wfLang.joinPoints` and `wfLang.shareLets`, the information the translation keeps about the captured
 function and its callees (`HOInfo`, `CalleeKind`, `GInfo`, `LoopInfo`, `Ctx`), the recognition of
 calls (`specCall?`, `calleeCall?`, `globalCall?`), the placeholders for global function indices
 (`gvarStx`, `resolveGRefs`) and erased proofs (`erasedProof`).
@@ -21,6 +21,14 @@ point. -/
 register_option wfLang.joinPoints : Bool := {
   defValue := true
   descr := "#lean_wf_func_to_term: capture the continuation of a non-tail if/match containing calls as a join point (otherwise it is copied into both branches)"
+}
+
+/-- `set_option wfLang.shareLets false` makes the capture substitute every Lean `let` whose
+value is call-free (the value is then computed at each use), instead of binding a value used
+more than once with a pure `let` statement (`PCL.Expr.plet`). -/
+register_option wfLang.shareLets : Bool := {
+  defValue := true
+  descr := "#lean_wf_func_to_term: capture a call-free Lean `let` whose variable is used more than once as a pure `let` statement (sharing), instead of substituting it"
 }
 
 /-- Surface syntax of a term. -/

@@ -13,6 +13,7 @@ Expr    ::= ret PExpr                        -- tail statements           (PCL/L
           | if PExpr then Expr else Expr
           | let v := self args in Expr       -- fixSelfCall
           | let v := g args in Expr          -- gCall   (g a global function)
+          | let v := PExpr in Expr           -- plet    (a pure let: sharing)
           | let v := map (fun x => Expr) PExpr in Expr  -- map (the body knows x ∈ list)
           | let v := foldl (fun acc x => Expr) PExpr PExpr in Expr  -- foldl (idem)
           | join j (v) := Expr in Expr       -- join    (a non-recursive join point)
@@ -56,7 +57,9 @@ global function (general recursion) or a recursive join point (tail recursion).
 
 Expressions are in **strict A-normal form**: arithmetic, comparisons, `bool_eq`, `&&`, `||`, `!`
 are in the call-free `PExpr` layer (`Core/PExpr.lean`); the result of every call (`gCall`,
-`fixSelfCall`) is bound to a new variable; and the compound statements `ite`, `join`, `joinrec`
+`fixSelfCall`) is bound to a new variable; a call-free value used several times may be bound
+once by a pure `let` (`plet`, sharing), whose continuation knows the equation `v = p`; and the
+compound statements `ite`, `join`, `joinrec`
 occur only in tail position: the rest of the computation is inside their branches, resp. their
 scope.  A Lean `if`/`match` containing a call in non-tail position is captured as
 `join j (v) := ⟦rest⟧ in if c then (…; jump j a) else (…; jump j b)`.
@@ -235,6 +238,17 @@ inductive Expr (GL : List Fn) : (Γ : List Ty) → (Env Γ → Prop) → Option 
       (hpre : ∀ e, G e → f.pre (args.eval e))
       (k : Expr GL (f.ret :: Γ) (fun e => G e.2 ∧ f.post (args.eval e.2) e.1)
         (sf.map (·.push f.ret)) t (fun e v => Q e.2 v) (.wk js f.ret)) :
+      Expr GL Γ G sf t Q js
+  /-- `let v := p in k`, a **pure `let`** (sharing): the call-free value `p` is computed once
+  and bound to a new variable `v`, which `k` may use any number of times.  `k` runs under the
+  current path condition and the equation `v = p`, so its proofs (decrease, pre- and
+  postconditions) see the value of `v`.  The value is in normal form and not atomic
+  (`PExpr.isShareable`: a variable or a literal would be substituted, not bound). -/
+  | plet {Γ : List Ty} {G : Env Γ → Prop} {sf : Option (Self Γ)} {t : Ty}
+      {Q : Env Γ → t.denote → Prop} {js : JScope Γ t}
+      (s : Ty) (p : PExpr Γ s) (hp : p.isShareable = true)
+      (k : Expr GL (s :: Γ) (fun e => G e.2 ∧ e.1 = p.eval e.2) (sf.map (·.push s)) t
+        (fun e v => Q e.2 v) (.wk js s)) :
       Expr GL Γ G sf t Q js
   /-- `let v := List.map (fun x => body) l in k`: the list `l` mapped by a statement `body`
   over one more variable `x`.  The body may make calls (recursive calls of the enclosing

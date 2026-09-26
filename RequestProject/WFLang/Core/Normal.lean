@@ -104,6 +104,18 @@ may be a negation: the body and the exit of a loop cannot be swapped. -/
 def PExpr.isLoopCond (c : PExpr Γ .bool) : Bool :=
   c.isNF && !c.isLit
 
+/-- Is the expression atomic (a variable or a literal)? -/
+def PExpr.isAtom {t : Ty} : PExpr Γ t → Bool
+  | .var _ => true
+  | .lit _ _ => true
+  | _ => false
+
+/-- A value that a pure `let` may bind (`PCL.Expr.plet`): in normal form and not atomic.  A
+variable or a literal costs nothing to recompute, so binding it would only rename it: it is
+substituted instead. -/
+def PExpr.isShareable {t : Ty} (p : PExpr Γ t) : Bool :=
+  p.isNF && !p.isAtom
+
 /-- Normal form of every expression of an argument tuple. -/
 def PExprs.isNF : {ts : List Ty} → PExprs Γ ts → Bool
   | _, .nil => true

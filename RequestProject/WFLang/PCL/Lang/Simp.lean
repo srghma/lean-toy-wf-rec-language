@@ -53,6 +53,15 @@ variable {GL : List Fn} (ge : FEnv GL) {Γ : List Ty} {G : Env Γ → Prop}
       (k.eval ge ((i.get ge (args.eval e) (hpre e g)).1, e)
         ⟨g, (i.get ge (args.eval e) (hpre e g)).2⟩ (Handler.push h) je).1 := rfl
 
+/-- A pure `let` computes its value once and runs the rest with it. -/
+@[simp] theorem eval_plet {sf : Option (Self Γ)}
+    (s : Ty) (p : PExpr Γ s) (hp : p.isShareable = true)
+    (k : Expr GL (s :: Γ) (fun e => G e.2 ∧ e.1 = p.eval e.2) (sf.map (·.push s)) t
+      (fun e v => Q e.2 v) (.wk js s))
+    (e : Env Γ) (g : G e) (h : Handler sf e) (je : JEnv js e) :
+    ((Expr.plet s p hp k).eval ge e g h je).1 =
+      (k.eval ge (p.eval e, e) ⟨g, rfl⟩ (Handler.push h) je).1 := rfl
+
 /-- A `map` node maps its body over the list (the membership proofs come from `List.attach`,
 in the evaluator only), then runs the rest on the result. -/
 @[simp] theorem eval_map {sf : Option (Self Γ)}

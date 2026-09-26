@@ -1,3 +1,59 @@
+# Summary of changes for run 3ed72b65-75e5-475c-ac8e-266906d4ccca
+You asked me to focus on the pure `let` (sharing) part of the A-normal form, and that is done. The full `lake build RequestProject` passes, including every existing test and the new one, and `lake build wfbench` builds too. There is no `sorry`. `#print axioms` on the new agreement theorems shows only `propext`, `Classical.choice` and `Quot.sound`.
+
+**Build fix first.** The project did not build at the start: `lake-manifest.json` pinned Mathlib v4.28.0, which doesn't match the project's Lean v4.34.0. I updated the manifest to Mathlib v4.34.0 and committed it.
+
+**The language** (`PCL/Lang/Syntax.lean`)
+- There is a new statement, `Expr.plet s p hp k`, written `let v := p in k`. The value `p` has no calls and is computed once; `k` can use `v` any number of times.
+- Inside `k`, the path condition also contains the equation `v = p`. So termination proofs, preconditions and postconditions can use the value of `v`.
+- `hp : p.isShareable = true` (in `Core/Normal.lean`) says `p` is in normal form and is not a variable or a literal. Binding one of those would only rename it, so a hand-written `let x := y in …` does not type-check.
+- I extended every place that handles statements:
+  - the evaluator, plus the simp lemma `eval_plet`;
+  - the constant-stack evaluator actually run by compiled code and `#eval`, and the proof that it agrees with the reference evaluator (`Expr.eval_val_eq_evalS`);
+  - `firstCall`, which the base-case theorems rely on;
+  - all size measures.
+- There are two new measures: `PTerm.lets` counts the pure `let`s, and `PTerm.exprNodes` counts the nodes of call-free expressions in a program, with a shared value counted once.
+
+**The capture**
+- A Lean `let x := v; b` becomes a `plet` when all of these hold:
+  - `v` has no calls and has a supported type;
+  - `v` is still not a variable or constant after simplification (so `let y := 2 + 3` is folded and substituted);
+  - `x` occurs at least twice in `b`.
+- This works in tail position, inside an operator argument next to a call, in loop bodies and in `do` notation.
+- Other call-free `let`s are substituted as before. `set_option wfLang.shareLets false` turns sharing off entirely.
+- The termination tactic has a new step, `wf_subst_lets`: it replaces each let-bound variable with its value, so proof goals look like the ones in the Lean function. For example, `gcdL` needs `m % n < n` for its recursive call on `r := m % n`.
+- `wf_agree` needed no change.
+
+**Tests** (`Tests/Sharing.lean`)
+- Agreement theorems (`wf_agree`) and runtime checks against the Lean functions for 15 functions: `sq2`, `pow4`, `nested`, `letList`, `letBool`, `sumSq`, `inArg`, `gcdL`, `sumLoop`, `doLet`, and `once`, `atom`, `folded` (the last three are correctly not shared), plus captures of `sumSq` and `pow4` with sharing turned off.
+- The number of pure `let`s is pinned for each capture. Expression-node counts with and without sharing are pinned too; for example, `pow4 a b c := let x := a * b + c; x * x * x * x` has 12 nodes with sharing and 23 without.
+- Hand-written programs: one with a proof about the result, and one binding a variable that is correctly rejected.
+
+**Limits:**
+- Only values the Lean function names with a `let` are shared. A subexpression written twice without a `let` (`n * n + n * n`) is still computed twice.
+- The two-use test counts occurrences in the source, so a variable used once in each branch of an `if` is still bound. That is harmless but gains nothing.
+
+`README.md`, `GRAMMAR.md` (new section on the pure `let`; the updated "why no Atom layer" and next-steps sections) and `UNSUPPORTED.md` are updated. The Properties table has two new entries: the `plet` statement, and the sharing agreement result (proved). All work is committed.
+
+# Summary of changes for run 62f71b71-4688-4816-b171-de898654d85b
+I went through `UNSUPPORTED.md` and added support for several of its items. For each newly supported case, `#lean_wf_func_to_term` now produces a program, `wf_agree` proves `Term.eval t … = f …`, and `#guard` checks sample inputs. The full `lake build RequestProject` succeeds with no `sorry` or new axioms. The new agreement theorems use only `propext`, `Classical.choice` and `Quot.sound`. The `wfbench` executable also builds.
+
+**Newly supported:**
+1. **More combinators:** `List.zipWith`, `List.partition`, `List.countP`, and `Array.foldl`, `foldr`, `map`, `any`, `all`, `contains`. Recursion inside `Array.map` also works. Tests are in `Tests/MoreCombinators.lean`.
+2. **`for x in a` over arrays**, including early `return`/`break` and recursive calls in the loop body (`forArr`, `forArrFind`, `forArrRec`, same test file).
+3. **Recursion that needs the membership proof from `attach`, beyond `List.map`.** I added a new statement to the language, `foldl`. Its body runs under the path condition `x ∈ l`, and it has evaluation, jump-machine, size and termination support. `l.attach.foldl`, `l.attach.any`, `l.attach.all`, and loops like `for h : x in l` or `for ⟨x, h⟩ in l.attach` are captured as long as the loop body never stops early. Examples include `depthSum` (previously rejected), `anyA`, `allA`, `forAttach`, `forMem` and `forMemIf`, all in `Tests/AttachCombinators.lean`.
+4. **`partial_fixpoint` definitions.** The capture tries candidate measures in turn: the value of a `Nat` parameter, the length of a `List` parameter, or the difference of two `Nat` parameters. It keeps the first one under which every recursive call is proved to decrease. `set_option wfLang.pfixMeasure k` picks a measure directly. The agreement theorem then also shows the function is total. Tests are in `Tests/PartialFixpoint.lean`.
+5. **An agreement-proof bug fix:** proofs could fail when a loop came after a call to another function. Identified values are now passed explicitly into the nested proofs.
+
+**Still not supported** (the rejections are pinned in `Tests/Unsupported.lean`):
+- A loop that uses its membership proof *and* stops early (`forMemRet`).
+- A `partial_fixpoint` with no working measure, e.g. the non-terminating `loopUp`.
+- User structures, `Fin n` and `UInt64`.
+
+I also tried simplifying `a + 9 + 10` to `a + 19` in the optimiser. It broke an existing agreement proof in `Tests/Basic.lean`, so I reverted it and noted this in `UNSUPPORTED.md`.
+
+**Documentation:** `UNSUPPORTED.md` now lists the items above in its §0 table of lifted items, and its tables and priorities are updated. `README.md`, `GAPS.md` and `GRAMMAR.md` describe the new `foldl` statement and features. The Properties table has four new proved entries: more combinators, attach/foldl recursion, `partial_fixpoint`, and array `for` loops. All work is committed.
+
 # Summary of changes for run a7fcc4b7-bae6-4c42-8bd3-afa6a4db5ade
 `underLambda` is now captured by `#lean_wf_func_to_term`, and its agreement theorem is proved. The project already had this support when I started, so I didn't need to write any new capture code. Earlier summaries still list `underLambda` as rejected, so I checked that the support actually works.
 

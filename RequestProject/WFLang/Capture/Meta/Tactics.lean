@@ -3,7 +3,7 @@ import RequestProject.WFLang.Capture.Meta.Mutual
 /-!
 # Capture metaprogramming: tactics
 
-The tactics `wf_norm_tuples`, `wf_dec`, `wf_solve`, `wf_dec_tag`, `wf_dec_ho`,
+The tactics `wf_norm_tuples`, `wf_subst_lets`, `wf_dec`, `wf_solve`, `wf_dec_tag`, `wf_dec_ho`,
 `wf_list_cases` and `wf_close`, used by the agreement proofs.
 -/
 
@@ -43,6 +43,62 @@ def normTuples (e : Lean.Expr) : MetaM Lean.Expr :=
       let ty' ← g.withContext (normTuples ty)
       if ty' != ty then g ← g.replaceLocalDeclDefEq fv ty'
     Tactic.replaceMainGoal [g]
+
+/-- Is `e` a variable of the program: a chain of projections `Prod.fst`/`Prod.snd` of a local
+variable (the environment)? -/
+partial def isEnvProj (e : Lean.Expr) : Bool :=
+  if e.isFVar then true
+  else if e.isAppOfArity ``Prod.fst 3 || e.isAppOfArity ``Prod.snd 3 then isEnvProj e.appArg!
+  else false
+
+/-- `wf_subst_lets` substitutes the variables bound by pure `let`s (`PCL.Expr.plet`): each
+hypothesis `x = v` of the path condition, where `x` is a variable of the program (a projection
+of the environment) that does not occur in the non-literal value `v`, is used to rewrite `x` into
+`v` in the goal and in the other hypotheses.  The obligations then mention the values
+themselves, as the Lean function does (for instance `m % n < n` rather than `r < n`, with the
+hypothesis `r = m % n`). -/
+syntax (name := wfSubstLets) "wf_subst_lets" : tactic
+
+/-- A hypothesis `x = v` of `g` that `wf_subst_lets` uses (see there), whose variable `x` is
+not in `done`. -/
+def letEqHyp? (g : MVarId) (done : List Lean.Expr) : MetaM (Option (FVarId × Lean.Expr)) :=
+  g.withContext do
+    for d in ← getLCtx do
+      if d.isImplementationDetail then continue
+      let ty ← instantiateMVars d.type
+      let some (_, lhs, rhs) := ty.eq? | continue
+      unless isEnvProj lhs && !lhs.isFVar && !done.contains lhs do continue
+      if rhs.isFVar || rhs.isRawNatLit || rhs.nat?.isSome || rhs.int?.isSome || rhs.isConst ||
+          isEnvProj rhs then continue
+      if (rhs.find? (· == lhs)).isSome then continue
+      return some (d.fvarId, lhs)
+    return none
+
+@[tactic wfSubstLets] def evalWfSubstLets : Tactic.Tactic := fun _ => Tactic.withMainContext do
+  let mut g ← Tactic.getMainGoal
+  let mut done : List Lean.Expr := []
+  for _ in [0:(← getLCtx).numIndices] do
+    let some (h, lhs) ← letEqHyp? g done | break
+    done := lhs :: done
+    g ← g.withContext do
+      let mut g := g
+      -- the goal
+      let tgt ← instantiateMVars (← g.getType)
+      if (tgt.find? (· == lhs)).isSome then
+        let r ← g.rewrite tgt (mkFVar h)
+        g ← g.replaceTargetEq r.eNew r.eqProof
+      -- the other hypotheses
+      for d in (← g.getDecl).lctx do
+        if d.isImplementationDetail || d.fvarId == h then continue
+        let ty ← instantiateMVars d.type
+        unless (ty.find? (· == lhs)).isSome do continue
+        unless ← isProp ty do continue
+        try
+          let r ← g.rewrite ty (mkFVar h)
+          g := (← g.replaceLocalDecl d.fvarId r.eNew r.eqProof).mvarId
+        catch _ => pure ()
+      return g
+  Tactic.replaceMainGoal [g]
 
 /-- `wf_dec [extra simp lemmas]` proves one obligation `∀ e, G e → P e` of a program from its
 path condition `G`: the decrease `R (args e) (cur e)` of a recursive call, the precondition of
@@ -90,6 +146,7 @@ macro_rules
       try simp [wflang_eval, WFLang.fixedRel, WFLang.fixedAtRel,
         WFLang.preRel, InvImage] at g ⊢
       try casesm* _ ∧ _
+      try wf_subst_lets
       try wf_norm_tuples
       first
         | wf_solve
@@ -108,6 +165,7 @@ macro_rules
       obtain ⟨t, e⟩ := e
       try simp [wflang_eval, InvImage] at g ⊢
       try casesm* _ ∧ _
+      try wf_subst_lets
       try subst_vars
       try simp only [ite_true, ite_false, reduceIte, WFLang.Ty.denote] at *
       try ((repeat' split) <;> (try contradiction))
@@ -128,6 +186,7 @@ macro_rules
       obtain ⟨t, e⟩ := e
       try simp [wflang_eval, InvImage] at g ⊢
       try casesm* _ ∧ _
+      try wf_subst_lets
       try subst_vars
       try simp only [ite_true, ite_false, reduceIte, WFLang.Ty.denote] at *
       try ((repeat' split) <;> (try contradiction))

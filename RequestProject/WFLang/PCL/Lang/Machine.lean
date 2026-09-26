@@ -188,6 +188,8 @@ def Expr.evalS {GL : List Fn} (ge : FEnv GL) : {Γ : List Ty} → {G : Env Γ �
   | _, _, _, _, _, _, .gCall i args _ hpre k, e, g, h =>
       let v := i.get ge (args.eval e) (hpre e g)
       (k.evalS ge (v.1, e) ⟨g, v.2⟩ (Handler.push h)).unwk
+  | _, _, _, _, _, _, .plet _ p _ k, e, g, h =>
+      (k.evalS ge (p.eval e, e) ⟨g, rfl⟩ (Handler.push h)).unwk
   | _, _, _, _, _, _, .map _ _ l _ body k, e, g, h =>
       let vs := (l.eval e).attach.map fun x =>
         (body.evalS ge (x.1, e) ⟨g, x.2⟩ (Handler.push h)).run (Handler.push h) ()
@@ -266,6 +268,9 @@ theorem Expr.eval_val_eq_evalS {GL : List Fn} (ge : FEnv GL) {Γ : List Ty} {G :
     · next heq hk => exact Expr.retHere?_eval ge k heq hk _ _ _ _
     · exact (ih _ _ _ _).trans (Step.unwk_run (sf := some _) _ h je).symm
   | gCall i args ha hpre k ih =>
+    simp only [Expr.eval, Expr.evalS, Step.unwk_run]
+    exact ih _ _ _ _
+  | plet s p hp k ih =>
     simp only [Expr.eval, Expr.evalS, Step.unwk_run]
     exact ih _ _ _ _
   | map s u l hl body k ihb ihk =>

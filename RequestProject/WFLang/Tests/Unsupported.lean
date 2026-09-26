@@ -9,8 +9,9 @@ of them, the build fails and `UNSUPPORTED.md` must be updated.  `#expect_reject`
 `MoreChecks.lean`) succeeds only if the capture fails, and reports the first line of its error.
 
 The functions that used to be listed here and are now captured, with agreement proofs, are in
-`Tests/NewTypes.lean`, `Tests/ListCombinators.lean`, `Tests/MutualSignatures.lean` and
-`Tests/LeanWhile.lean` (`findDiv`).
+`Tests/NewTypes.lean`, `Tests/ListCombinators.lean`, `Tests/MutualSignatures.lean`,
+`Tests/LeanWhile.lean` (`findDiv`), `Tests/MoreCombinators.lean`, `Tests/PartialFixpoint.lean` and
+`Tests/AttachCombinators.lean` (`depthSum`).
 -/
 
 open WFLang
@@ -41,17 +42,19 @@ measure works. -/
 def loopUp (n : Nat) : Nat := loopUp (n + 1)
 partial_fixpoint
 
-/-! ## A recursive call inside a combinator whose termination needs `attach`
+/-! ## A loop that uses the membership proof and may stop early
 
-The membership proof `i ∈ List.range n` given by `attach` is what proves the decrease of the
-call; it is erased for `List.map` (`Tests/Map.lean`), but not for the other combinators.  (The
-capture fails with an internal error here, whose text is not stable, so only the rejection is
-pinned.) -/
+Loops over `l.attach` (and `for h : x in l`) whose body always continues are captured
+(`Tests/AttachCombinators.lean`); with an early `return` or `break` they are not. -/
 
-def depthSum (n : Nat) : Nat :=
-  if n = 0 then 0 else (List.range n).attach.foldl (fun acc ⟨i, _h⟩ => acc + depthSum i) 1
+def forMemRet (n : Nat) : Nat := Id.run do
+  let mut s := 1
+  for h : i in List.range n do
+    have : i < n := List.mem_range.mp h
+    if s > 100 then return s
+    s := s + forMemRet i
+  return s
 termination_by n
-decreasing_by simp at _h; omega
 
 end Unsupported
 
@@ -71,4 +74,4 @@ end Unsupported
 #expect_reject (#lean_wf_func_to_term Unsupported.loopUp : PCL.Term ⟨[.nat], .nat⟩)
 
 #guard_msgs (drop info) in
-#expect_reject (#lean_wf_func_to_term Unsupported.depthSum : PCL.Term ⟨[.nat], .nat⟩)
+#expect_reject (#lean_wf_func_to_term Unsupported.forMemRet : PCL.Term ⟨[.nat], .nat⟩)

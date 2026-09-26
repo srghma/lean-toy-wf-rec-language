@@ -35,6 +35,7 @@ import RequestProject.WFLang.Tests.LeanWhile
 import RequestProject.WFLang.Tests.Instances
 import RequestProject.WFLang.Tests.Map
 import RequestProject.WFLang.Tests.EvalChecks
+import RequestProject.WFLang.Tests.Sharing
 
 /-!
 # PCL: a typed toy language capturing well-founded Lean functions

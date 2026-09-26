@@ -198,6 +198,17 @@ partial def yieldVal? (m : Lean.Expr) : MetaM (Option Lean.Expr) := do
     let some a ← yieldVal? (m.getArg! 3) | return none
     let some b ← yieldVal? (m.getArg! 4) | return none
     return some (mkAppN m.getAppFn #[← inferType a, m.getArg! 1, m.getArg! 2, a, b])
+  -- `match d with | ⟨a₁, …, aₖ⟩ => b` on a structure `d`: `b` at the projections of `d`
+  if let some app ← matchMatcherApp? m then
+    if app.alts.size == 1 && app.discrs.size == 1 && app.remaining.isEmpty then
+      let d := app.discrs[0]!
+      let .const sn _ := (← whnfR (← inferType d)).getAppFn | return none
+      let some info := getStructureInfo? (← getEnv) sn | return none
+      let fields ← info.fieldNames.mapM fun f => mkProjection d f
+      let alt := app.alts[0]!
+      let body := alt.beta fields
+      if body.isLambda then return none
+      return ← yieldVal? body
   return none
 
 /-- `for i in [a:b] do …` (in `Id`, step `1`, a body that always continues) as
@@ -231,7 +242,27 @@ def listLoopOfForIn? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
   lambdaBoundedTelescope body 2 fun zs m => do
     unless zs.size == 2 do return none
     let some t ← yieldVal? m | return none
+    -- over `l.attach`: a `List.foldl` over `l.attach`, which becomes a `foldl` statement
+    if (e.getArg! 5).consumeMData.isAppOfArity ``List.attach 2 then
+      return some (← mkAppM ``List.foldl #[← mkLambdaFVars #[zs[1]!, zs[0]!] t, e.getArg! 6, e.getArg! 5])
     return some (← mkAppM ``WFLang.listFoldl #[← mkLambdaFVars #[zs[1]!, zs[0]!] t, e.getArg! 6, e.getArg! 5])
+
+/-- `for h : x in l do …` over a list (in `Id`, a body that always continues, using the
+membership proof `h : x ∈ l`) as `List.foldl (fun s y => …) init l.attach`, with `x := y.1` and
+`h := y.2`; the fold over `l.attach` becomes a `foldl` statement. -/
+def listLoopOfForIn'? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
+  unless (← whnfR (e.getArg! 1)).isAppOfArity ``List 1 do return none
+  let l := e.getArg! 6
+  let att ← mkAppM ``List.attach #[l]
+  let yTy ← inferType att
+  let .app _ elTy := (← whnfR yTy) | return none
+  let body := e.getArg! 8
+  lambdaBoundedTelescope body 3 fun zs m => do
+    unless zs.size == 3 do return none
+    withLocalDeclD `y elTy fun y => do
+      let m := m.replaceFVars #[zs[0]!, zs[1]!] #[← mkAppM ``Subtype.val #[y], ← mkAppM ``Subtype.property #[y]]
+      let some t ← yieldVal? m | return none
+      return some (← mkAppM ``List.foldl #[← mkLambdaFVars #[zs[2]!, y] t, e.getArg! 7, att])
 
 /-- `for i in [a:b:s] do …` (in `Id`) whose body may stop early (`break`, `return`) or whose range
 has a step `s ≠ 1`, as `WFLang.rangeLoopN (fun i r => …) size s a init`, where `size` is the number
@@ -261,6 +292,13 @@ def listCombinator? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
   -- (a fold over `l.attach` stays: it becomes a `foldl` statement, see `Capture/Stmt.lean`)
   if e.isAppOfArity ``List.foldl 5 && (args[4]!).consumeMData.isAppOfArity ``List.attach 2 then
     return none
+  -- `l.attach.any p`, `l.attach.all p`: folds over `l.attach` (`Core/MoreCombinators.lean`)
+  if (e.isAppOfArity ``List.any 3 || e.isAppOfArity ``List.all 3) &&
+      (args[1]!).consumeMData.isAppOfArity ``List.attach 2 then
+    let isAny := e.isAppOf ``List.any
+    let f ← withLocalDeclD `acc (Lean.mkConst ``Bool) fun acc => withLocalDeclD `x args[0]! fun x => do
+      mkLambdaFVars #[acc, x] (← mkAppM (if isAny then ``or else ``and) #[acc, (mkApp args[2]! x).headBeta])
+    return some (← mkAppM ``List.foldl #[f, Lean.mkConst (if isAny then ``Bool.false else ``Bool.true), args[1]!])
   if e.isAppOfArity ``List.foldl 5 then
     return some (← mkAppM ``WFLang.listFoldl #[args[2]!, args[3]!, args[4]!])
   if e.isAppOfArity ``List.foldr 5 then
@@ -371,10 +409,17 @@ def normLoops (e : Lean.Expr) : MetaM Lean.Expr :=
       return .visit (mkApp (e.getArg! 5) (e.getArg! 4)).headBeta
     if e.isAppOfArity ``Pure.pure 4 && isId (e.getArg! 0) then return .visit (e.getArg! 3)
     if e.isAppOfArity ``ForIn.forIn 8 && isId (e.getArg! 0) then
+      -- `for x in a` over an array: the loop over `a.toList`
+      if (← whnfR (e.getArg! 1)).isAppOfArity ``Array 1 then
+        let l ← mkAppM ``Array.toList #[e.getArg! 5]
+        return .visit (← mkAppOptM ``ForIn.forIn
+          #[e.getArg! 0, ← inferType l, e.getArg! 2, none, e.getArg! 4, l, e.getArg! 6, e.getArg! 7])
       if let some r ← rangeLoopOfForIn? e then return .visit r
       if let some r ← listLoopOfForIn? e then return .visit r
       if let some r ← rangeLoopNOfForIn? e then return .visit r
       if let some r ← listLoopNOfForIn? e then return .visit r
+    if e.isAppOfArity ``ForIn'.forIn' 9 && isId (e.getArg! 0) then
+      if let some r ← listLoopOfForIn'? e then return .visit r
     if let some r ← listCombinator? e then return .visit r
     -- bounded quantifiers, in `decide` and in the test of an `if`
     if e.isAppOfArity ``Decidable.decide 2 then

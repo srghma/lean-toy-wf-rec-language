@@ -75,3 +75,45 @@ theorem arrRec_agree : ∀ n, Term.eval arrRec_term n = MoreComb.arrRec n := by 
   Term.eval arrAllSmall_term l.toArray == MoreComb.arrAllSmall l.toArray &&
   Term.eval arrHas3_term l.toArray == MoreComb.arrHas3 l.toArray
 #guard (List.range 6).all fun n => Term.eval arrRec_term n == MoreComb.arrRec n
+
+/-! ## `for x in a` over an array
+
+The loop over an array is the loop over `a.toList` (with `break`/`return` as well). -/
+
+namespace MoreComb
+
+def forArr (a : Array Nat) : Nat := Id.run do
+  let mut s := 0
+  for x in a do s := s + x
+  return s
+
+def forArrFind (a : Array Nat) (k : Nat) : Bool := Id.run do
+  for x in a do
+    if x == k then return true
+  return false
+
+def forArrRec (n : Nat) (a : Array Nat) : Nat := Id.run do
+  if n = 0 then return 1
+  let mut s := 0
+  for x in a do s := s + x * forArrRec (n - 1) a
+  return s
+termination_by n
+decreasing_by omega
+
+end MoreComb
+
+def forArr_term : Term ⟨[.array .nat], .nat⟩ := #lean_wf_func_to_term MoreComb.forArr
+theorem forArr_agree : ∀ a, Term.eval forArr_term a = MoreComb.forArr a := by wf_agree
+
+def forArrFind_term : Term ⟨[.array .nat, .nat], .bool⟩ := #lean_wf_func_to_term MoreComb.forArrFind
+theorem forArrFind_agree : ∀ a k, Term.eval forArrFind_term a k = MoreComb.forArrFind a k := by
+  wf_agree
+
+def forArrRec_term : Term ⟨[.nat, .array .nat], .nat⟩ := #lean_wf_func_to_term MoreComb.forArrRec
+theorem forArrRec_agree : ∀ n a, Term.eval forArrRec_term n a = MoreComb.forArrRec n a := by
+  wf_agree
+
+#guard [[], [3], [1, 2, 3, 4], [5, 0, 7]].all fun l =>
+  Term.eval forArr_term l.toArray == MoreComb.forArr l.toArray &&
+  Term.eval forArrFind_term l.toArray 3 == MoreComb.forArrFind l.toArray 3 &&
+  Term.eval forArrRec_term 3 l.toArray == MoreComb.forArrRec 3 l.toArray

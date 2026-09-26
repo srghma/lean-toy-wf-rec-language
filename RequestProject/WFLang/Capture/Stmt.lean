@@ -44,6 +44,9 @@ remainder. -/
 partial def lift (c : Ctx) (e : Lean.Expr) (k : Ctx → Lean.Expr → TermElabM Stx) :
     TermElabM Stx := do
   let e := (← instantiateMVars e).consumeMData.headBeta
+  -- `let x := v; b` with a call-free value used more than once: `let x := v in ⟦b⟧` (sharing)
+  if let some (n, ty, v, pe, b) ← shareLet? c e then
+    return ← pletStx c n ty v pe b fun c b => lift c b k
   if !hasCall c e then return ← k c e
   -- `let x := v; b` whose value calls: evaluate `v` once, then `b`
   if e.isLet && hasCall c e.letValue! then
@@ -388,6 +391,8 @@ partial def backEdgeStx (c : Ctx) (li : LoopInfo) (e : Lean.Expr) : TermElabM St
 /-- A Lean expression in tail position, as a statement. -/
 partial def stmt (c : Ctx) (e : Lean.Expr) : TermElabM Stx := do
   let e := (← instantiateMVars e).consumeMData.headBeta
+  if let some (n, ty, v, pe, b) ← shareLet? c e then
+    return ← pletStx c n ty v pe b stmt
   if !hasCall c e then return ← tailStx c e
   if let some li := c.loop? then
     if e.getAppFn.isConstOf li.ref.name then return ← backEdgeStx c li e

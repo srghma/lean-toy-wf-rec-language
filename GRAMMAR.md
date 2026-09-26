@@ -19,12 +19,17 @@ PExpr  ::= x | lit | op PExpr PExpr | !PExpr | if PExpr then PExpr else PExpr
 NF     ::= PExpr  with  isNF = true              -- optimised normal form (Core/Normal.lean)
 Cond   ::= PExpr  with  isCond = true            -- NF, not a literal, not a negation
 LCond  ::= PExpr  with  isLoopCond = true        -- NF, not a literal (a loop test)
+Share  ::= PExpr  with  isShareable = true       -- NF, not a variable or a literal
 
 Expr   ::= ret NF                                     -- return
          | if Cond then Expr else Expr                -- case          (tail only)
          | let v := self NF* in Expr                  -- fixSelfCall   (carries `dec`)
          | let v := g NF* in Expr                     -- gCall         (global function)
+         | let v := Share in Expr                     -- plet          (pure let: sharing;
+                                                      --  the rest knows v = the value)
          | let v := map (fun x => Expr) NF in Expr    -- map           (the body knows x ∈ l)
+         | let v := foldl (fun acc x => Expr) NF NF in Expr
+                                                      -- foldl         (the body knows x ∈ l)
          | join j (v : s) := Expr in Expr             -- join          (tail only)
          | joinrec j (x : s) [R, wf] := Expr in Expr  -- joinrec       (tail only; a loop)
          | jump j NF                                  -- jump          (tail; a back edge
@@ -46,7 +51,9 @@ grammar enforces an **optimised normal form** and a **global context** (sections
 ## Optimised normal form (`Core/Normal.lean`)
 
 Every call-free expression occurring in a statement (`ret`, the arguments of the two kinds
-of calls, `jump`) carries a proof `p.isNF = true`, and every `if` test a proof `c.isCond = true`.
+of calls, `jump`) carries a proof `p.isNF = true`, the value of a pure `let` a proof
+`p.isShareable = true` (normal form, and not a variable or a literal), and every `if` test a
+proof `c.isCond = true`.
 `isNF` is a Boolean function, so these proofs are `by decide` and are erased at runtime.
 `isNF` rejects every expression that the capture would still simplify:
 
@@ -70,6 +77,38 @@ type-check (`Tests/Normal.lean`).
 
 Every rewrite preserves `PExpr.eval`, and the agreement theorems (`wf_agree`) are proved about
 the simplified programs, so each capture is checked against the Lean function end to end.
+
+## Pure `let`: sharing (`PCL/Lang/Syntax.lean`, `Capture/Stmt.lean`)
+
+```
+let v := p in k            -- Expr.plet s p hp k
+```
+
+* `p` is a call-free expression, computed once; `k` runs in the context extended by `v`.
+* The path condition of `k` is the current one plus the equation `v = p`, so the proofs in `k`
+  (decrease of recursive calls and back edges, preconditions, postconditions) know the value of
+  `v`. Example: in `gcdL` (`Tests/Sharing.lean`), `let r := m % n; … gcdL n r` needs `r < n`,
+  which follows from `r = m % n` and `n ≠ 0`.
+* `hp : p.isShareable = true` (`Core/Normal.lean`): `p` is in normal form and is not a
+  variable or a literal. Binding an atom would only rename it, so the normal form requires it
+  to be substituted instead; a hand-written `let x := y in …` is ill-typed.
+* Semantics: `Expr.eval` evaluates `p` once and passes its value to `k` (`eval_plet`); the jump
+  machine does the same (`evalS`), and `eval_val_eq_evalS` covers the new case. Soundness and
+  the termination results (`fix_body_reaches_base`, …) extend to it: `firstCall` continues into
+  `k` with the value of `p`.
+* Capture: a Lean `let x := v; b` becomes `plet` when `v` is call-free, of an object type, not
+  atomic once simplified (so `let y := 2 + 3` is folded and substituted), and `x` occurs at
+  least twice in `b` (counted syntactically, `bvarUses`). This works in tail and non-tail
+  position (`stmt`, `lift`), inside loop bodies and in `do` notation. Other call-free `let`s are
+  substituted as before; `set_option wfLang.shareLets false` substitutes all of them.
+* Proofs: `wf_dec` rewrites each program variable bound by a `plet` into its value
+  (`wf_subst_lets`) before the usual closing tactics, so decrease obligations have the same form
+  as in the Lean function. `wf_agree` needs no change: `eval_plet` is a simplification lemma,
+  and the Lean `let` is unfolded by `simp`.
+* Measures: `PTerm.lets` counts the `plet` nodes, and `PTerm.exprNodes` counts the nodes of
+  the call-free expressions of a program (each shared value counted once). For
+  `pow4 a b c := let x := a * b + c; x * x * x * x`, `exprNodes` is 12 with sharing and 23
+  without (`Tests/Sharing.lean`).
 
 ## `while` loops (`PCL/Lang/While.lean`, `Core/While.lean`)
 
@@ -138,6 +177,15 @@ termination proof of `f x`, and the capture produces `map (fun x => f x) l`, whe
 the path condition. The agreement proofs relate the two forms with `List.attach_map_val`.
 `PTerm.maps` counts the `map` nodes; `Tests/Map.lean` has the examples, including
 `underLambda`.
+
+`let v := foldl (fun acc x => body) init l in k` (`Expr.foldl s u l hl init hi body k`) is the
+same idea for a left fold: `body` is a statement over two more variables, the accumulator
+`acc : u` and the element `x : s`, whose path condition is the current one plus `x ∈ l`
+(`eval_foldl`: the evaluator folds over `l.attach`). A Lean `l.attach.foldl (fun acc ⟨x, h⟩ => …)
+init`, and the forms rewritten into it (`l.attach.any p`, `l.attach.all p`, and a `for` loop that
+uses its membership proof, `for h : x in l` or `for ⟨x, h⟩ in l.attach`, whose body always
+continues), is captured as `foldl`; `Tests/AttachCombinators.lean` has the examples
+(`depthSum`, `forMem`).
 
 ## Global context (`PCL/Lang/Program.lean`, `Capture/Elab/Term.lean`)
 
@@ -301,9 +349,11 @@ Full ANF restricts operator arguments to atoms and names every intermediate resu
    effect, calling a function, is already pulled out into `fixSelfCall` / `gCall`;
 2. **there is a cost model or a machine to compile to**, such as registers or stack slots. There
    is neither here: the evaluator is denotational;
-3. **sharing**: a pure subexpression that is written twice is computed twice.
+3. **sharing**: a pure subexpression that is written twice is computed twice. This is now
+   addressed by the pure `let` statement (`plet`, section above), without atoms.
 
-Only point 3 applies. Atoms everywhere would be a heavy way to address it:
+Only point 3 applies, and the pure `let` handles it. Atoms everywhere would have been a heavy
+way to address it:
 * every operator would need its own `let` statement;
 * the path conditions would grow with those `let`s;
 * every agreement proof would need more `simp` steps.
@@ -313,10 +363,9 @@ soundness or termination.
 
 ## Possible next refinements (not implemented)
 
-* **A pure `let v := p in k` statement**, with the path condition extended by `v = p`. At present
-  the capture substitutes a Lean `let` whose value is call-free, so a value used twice is computed
-  twice. This `let` would add sharing without atoms. It is also where a separate `Comp` layer
-  would actually pay off.
+* **Sharing beyond Lean `let`s** (common subexpression elimination): the capture only shares
+  what the Lean function names with a `let`; a subexpression written twice without a `let` is
+  still computed twice.
 * **Join points in functions with postconditions**: give the join parameter a precondition
   recording the relevant postcondition (e.g. `∃ args, post args v`) instead of copying.
 * **Merging `fixSelfCall` into `gCall`**, with `self` as a global function whose calls carry

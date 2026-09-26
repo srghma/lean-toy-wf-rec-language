@@ -113,8 +113,11 @@ These were listed as unsupported and are now captured, with agreement proofs
 
 * **User structures and inductive types, `Fin n`, `UInt8`…`UInt64`, `Float`, `BitVec`**: not in
   `Ty` (`Tests/Unsupported.lean`).
-* **Recursive calls inside a combinator other than `List.map` whose decrease needs the membership
-  proof of `attach`** (`Unsupported.depthSum`): the proofs are erased only for `List.map`.
+* **Loops that use their membership proof and may stop early** (`Unsupported.forMemRet`):
+  recursive calls whose decrease needs `x ∈ l` are captured in `List.map`, and in `List.foldl`,
+  `any`, `all` over `l.attach` and `for h : x in l` loops whose body always continues (the
+  `foldl` statement, `Tests/AttachCombinators.lean`), but not in such a loop with `break` or
+  `return`.
 * **Function-valued parameters without a known argument**, e.g. `#lean_wf_func_to_term Tco.iter`
   on its own: the program would need function types in `Ty`. Capture a specialised copy instead.
 * Restrictions of recursion through a function argument: one specialised function per captured
@@ -126,7 +129,9 @@ These were listed as unsupported and are now captured, with agreement proofs
   (`Capture/LeanWhile.lean`, `Tests/LeanWhile.lean`), including `return` inside a loop. Still
   rejected: recursive functions containing a loop (`LeanWhileRejected.recLoop`), and
   `ackWhile` / `ackNoDataStructure` (no measure: the stack needs a multiset order).
-* **Not well-founded definitions**: `partial def`, `partial_fixpoint`. Lean
+* **Not well-founded definitions**: `partial def`, and `partial_fixpoint` definitions for which
+  none of the measures the capture tries decreases (`Unsupported.loopUp`); a `partial_fixpoint`
+  definition with such a measure is captured (`Tests/PartialFixpoint.lean`). Lean
   builds them without any termination proof (opaque implementations), so
   there is no relation or decreasing proof to reuse, and the evaluator of `PCL` is total. They
   can be captured after being rewritten with the **well-founded `while`** (`wf_while … termination_by μ`, or
