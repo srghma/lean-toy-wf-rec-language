@@ -21,6 +21,7 @@ def Expr.size : {Γ : List Ty} → {G : Env Γ → Prop} → {sf : Option (Self 
   | _, _, _, _, _, _, .fixSelfCall _ _ _ _ k => 1 + k.size
   | _, _, _, _, _, _, .gCall _ _ _ _ k => 1 + k.size
   | _, _, _, _, _, _, .map _ _ _ _ body k => 1 + body.size + k.size
+  | _, _, _, _, _, _, .foldl _ _ _ _ _ _ body k => 1 + body.size + k.size
   | _, _, _, _, _, _, .join _ _ body m => 1 + body.size + m.size
   | _, _, _, _, _, _, .joinrec _ _ _ _ body m => 1 + body.size + m.size
   | _, _, _, _, _, _, .jump _ _ _ _ _ => 1
@@ -33,6 +34,7 @@ def Expr.joins : {Γ : List Ty} → {G : Env Γ → Prop} → {sf : Option (Self
   | _, _, _, _, _, _, .fixSelfCall _ _ _ _ k => k.joins
   | _, _, _, _, _, _, .gCall _ _ _ _ k => k.joins
   | _, _, _, _, _, _, .map _ _ _ _ body k => body.joins + k.joins
+  | _, _, _, _, _, _, .foldl _ _ _ _ _ _ body k => body.joins + k.joins
   | _, _, _, _, _, _, .join _ _ body m => 1 + body.joins + m.joins
   | _, _, _, _, _, _, .joinrec _ _ _ _ body m => body.joins + m.joins
   | _, _, _, _, _, _, .jump _ _ _ _ _ => 0
@@ -45,6 +47,7 @@ def Expr.loops : {Γ : List Ty} → {G : Env Γ → Prop} → {sf : Option (Self
   | _, _, _, _, _, _, .fixSelfCall _ _ _ _ k => k.loops
   | _, _, _, _, _, _, .gCall _ _ _ _ k => k.loops
   | _, _, _, _, _, _, .map _ _ _ _ body k => body.loops + k.loops
+  | _, _, _, _, _, _, .foldl _ _ _ _ _ _ body k => body.loops + k.loops
   | _, _, _, _, _, _, .join _ _ body m => body.loops + m.loops
   | _, _, _, _, _, _, .joinrec _ _ _ _ body m => 1 + body.loops + m.loops
   | _, _, _, _, _, _, .jump _ _ _ _ _ => 0
@@ -57,6 +60,7 @@ def Expr.gcalls : {Γ : List Ty} → {G : Env Γ → Prop} → {sf : Option (Sel
   | _, _, _, _, _, _, .fixSelfCall _ _ _ _ k => k.gcalls
   | _, _, _, _, _, _, .gCall _ _ _ _ k => 1 + k.gcalls
   | _, _, _, _, _, _, .map _ _ _ _ body k => body.gcalls + k.gcalls
+  | _, _, _, _, _, _, .foldl _ _ _ _ _ _ body k => body.gcalls + k.gcalls
   | _, _, _, _, _, _, .join _ _ body m => body.gcalls + m.gcalls
   | _, _, _, _, _, _, .joinrec _ _ _ _ body m => body.gcalls + m.gcalls
   | _, _, _, _, _, _, .jump _ _ _ _ _ => 0
@@ -69,6 +73,7 @@ def Expr.maps : {Γ : List Ty} → {G : Env Γ → Prop} → {sf : Option (Self 
   | _, _, _, _, _, _, .fixSelfCall _ _ _ _ k => k.maps
   | _, _, _, _, _, _, .gCall _ _ _ _ k => k.maps
   | _, _, _, _, _, _, .map _ _ _ _ body k => 1 + body.maps + k.maps
+  | _, _, _, _, _, _, .foldl _ _ _ _ _ _ body k => body.maps + k.maps
   | _, _, _, _, _, _, .join _ _ body m => body.maps + m.maps
   | _, _, _, _, _, _, .joinrec _ _ _ _ body m => body.maps + m.maps
   | _, _, _, _, _, _, .jump _ _ _ _ _ => 0

@@ -52,8 +52,29 @@ Well-founded recursion: Lean's relation on the domain `PSum D₀ (PSum D₁ …)
 definition `f._mutual`, pulled back along `(i, xs) ↦ inj_i (pack xs)`. -/
 def groupFixOf (group : Array Name) : MetaM (Lean.Expr × Lean.Expr × Array Lean.Expr) := do
   let sig ← fnSig { name := group[0]!, group }
+  let lay ← groupLayout group
   let gam := mkTyList sig.argTys
   let env ← getEnv
+  if (Lean.Elab.Structural.eqnInfoExt.find? env group[0]!).isSome && !lay.shared then
+    -- structural recursion, members with different parameters: the measure is the recursive
+    -- parameter (its length, for a list) of the member selected by the tag
+    let proj ← withLocalDeclD `e (mkApp (Lean.mkConst ``WFLang.Env) gam) fun e => do
+      let ms ← (List.range group.size).toArray.mapM fun i => do
+        let some info := Lean.Elab.Structural.eqnInfoExt.find? env group[i]! |
+          throwError "#lean_wf_func_to_term: {group[i]!} is not defined by structural recursion"
+        let some j := lay.sigs[i]!.objPos.findIdx? (· == info.recArgPos) |
+          throwError "#lean_wf_func_to_term: unexpected recursive parameter"
+        let v ← envProj e (1 + lay.offs[i]! + j)
+        if (lay.sigs[i]!.argTys[j]!).isAppOf ``WFLang.Ty.list then mkAppM ``List.length #[v]
+        else pure v
+      mkLambdaFVars #[e] (← tagSelect (← envProj e 0) ms)
+    let nat := Lean.mkConst ``Nat
+    let lt := mkLambda `a .default nat <| mkLambda `b .default nat <|
+      mkApp4 (Lean.mkConst ``LT.lt [0]) nat (Lean.mkConst ``instLTNat) (.bvar 1) (.bvar 0)
+    let R ← mkAppM ``InvImage #[lt, proj]
+    let wf ← mkAppM ``InvImage.wf #[proj,
+      ← mkAppOptM ``WellFoundedRelation.wf #[none, some (Lean.mkConst ``Nat.lt_wfRel)]]
+    return (R, wf, #[])
   if let some i := Lean.Elab.Structural.eqnInfoExt.find? env group[0]! then
     for g in group do
       let some i' := Lean.Elab.Structural.eqnInfoExt.find? env g | throwError "unexpected"
@@ -76,7 +97,9 @@ def groupFixOf (group : Array Name) : MetaM (Lean.Expr × Lean.Expr × Array Lea
       let t ← envProj e 0
       let rest ← mkAppM ``Prod.snd #[e]
       let vs ← (List.range k).toArray.mapM fun i => do
-        psumInj fi.dom i k (← packE (← psumSummand fi.dom i k) rest)
+        let mut r := rest
+        for _ in [0:lay.offs[i]!] do r ← mkAppM ``Prod.snd #[r]
+        psumInj fi.dom i k (← packE (← psumSummand fi.dom i k) r)
       mkLambdaFVars #[e] (← tagSelect t vs)
     return (← mkAppM ``InvImage #[fi.r, pack], ← mkAppM ``InvImage.wf #[pack, fi.hwf],
       ← callSiteProofs fi.F)
@@ -90,8 +113,11 @@ def fnSolutionGroup (f : FnRef) : MetaM Lean.Expr := do
     withLocalDeclD `hx (mkConst ``True) fun hx => do
       let t ← envProj x 0
       let rest ← mkAppM ``Prod.snd #[x]
-      let args ← (List.range sig.objPos.length).toArray.mapM (envProj rest)
-      let vs ← f.group.mapM fun g => do return mkAppN (← mkConstWithLevelParams g) args
+      let lay ← groupLayout f.group
+      let vs ← (List.range f.group.size).toArray.mapM fun i => do
+        let args ← (List.range lay.sigs[i]!.argTys.length).toArray.mapM
+          (envProj rest <| lay.offs[i]! + ·)
+        lay.inj i (mkAppN (← mkConstWithLevelParams f.group[i]!) args)
       let v ← tagSelect t vs
       let postX := mkLambda `v .default retD (mkConst ``True)
       mkLambdaFVars #[x, hx]

@@ -14,6 +14,7 @@ Expr    ::= ret PExpr                        -- tail statements           (PCL/L
           | let v := self args in Expr       -- fixSelfCall
           | let v := g args in Expr          -- gCall   (g a global function)
           | let v := map (fun x => Expr) PExpr in Expr  -- map (the body knows x ∈ list)
+          | let v := foldl (fun acc x => Expr) PExpr PExpr in Expr  -- foldl (idem)
           | join j (v) := Expr in Expr       -- join    (a non-recursive join point)
           | joinrec j (v) [R] := Expr in Expr  -- joinrec (a recursive join point: a loop)
           | jump j PExpr                     -- jump
@@ -249,6 +250,22 @@ inductive Expr (GL : List Fn) : (Γ : List Ty) → (Env Γ → Prop) → Option 
         (fun _ _ => True) .nil)
       (k : Expr GL (.list u :: Γ) (fun e => G e.2) (sf.map (·.push (.list u))) t
         (fun e v => Q e.2 v) (.wk js (.list u))) :
+      Expr GL Γ G sf t Q js
+  /-- `let v := List.foldl (fun acc x => body) init l in k`: the list `l` folded from `init` by a
+  statement `body` over two more variables, the element `x` and the accumulator `acc`.  Like the
+  body of `map`, the body may make calls (recursive calls of the enclosing function included);
+  it runs under the current path condition and the fact that `x` is an element of `l`
+  (`x ∈ l`), which its decrease proofs may use, and the program holds no proof term for it: a
+  Lean `l.attach.foldl (fun acc ⟨x, h⟩ => …) init` is captured as `foldl (fun acc x => …) init l`.
+  The body has no join point in scope and no postcondition. -/
+  | foldl {Γ : List Ty} {G : Env Γ → Prop} {sf : Option (Self Γ)} {t : Ty}
+      {Q : Env Γ → t.denote → Prop} {js : JScope Γ t}
+      (s u : Ty) (l : PExpr Γ (.list s)) (hl : l.isNF = true) (init : PExpr Γ u)
+      (hi : init.isNF = true)
+      (body : Expr GL (u :: s :: Γ) (fun e => G e.2.2 ∧ e.2.1 ∈ l.eval e.2.2)
+        ((sf.map (·.push s)).map (·.push u)) u (fun _ _ => True) .nil)
+      (k : Expr GL (u :: Γ) (fun e => G e.2) (sf.map (·.push u)) t
+        (fun e v => Q e.2 v) (.wk js u)) :
       Expr GL Γ G sf t Q js
   /-- `join j (v : s) := body in m`, in tail position: the join point `j` (whose parameter
   satisfies `P`) is in scope in `m`.  Its body runs in the current context extended by `v`,

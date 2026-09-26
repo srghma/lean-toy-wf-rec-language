@@ -268,9 +268,10 @@ pinned in `Tests/Joins.lean`.
 **Semantics.**
 * `Expr.eval` takes the values of the join points as an extra argument `JEnv js e`.
 * `join` passes the closure of its body to its scope, and `jump` calls that closure.
-* The evaluator is still structural recursion with no fuel. `#print axioms Expr.eval` still
-  reports only `propext`, as before, and this is checked by `#guard_msgs` in
-  `PCL/Termination.lean`.
+* The evaluator is still structural recursion with no fuel. `#print axioms Expr.eval` reports
+  only standard axioms (`propext`, and, since `String` was added to the types, `Classical.choice`
+  and `Quot.sound`, which come from Lean's `String` library), and this is checked by
+  `#guard_msgs` in `PCL/Termination.lean`.
 
 **Re-proved for the new grammar.**
 * `fixFn_eq` and `fixFn_unique`: a function body runs with no join points in scope.

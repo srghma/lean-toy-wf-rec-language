@@ -4,6 +4,7 @@ import RequestProject.WFLang.Core.PExpr
 import RequestProject.WFLang.Core.PExprMap
 import RequestProject.WFLang.Core.LeanWhile
 import RequestProject.WFLang.Core.Normal
+import RequestProject.WFLang.Core.LibLemmas
 import RequestProject.WFLang.PCL.Lang
 import RequestProject.WFLang.PCL.Size
 import RequestProject.WFLang.PCL.Termination

@@ -22,11 +22,16 @@ theorem gcd_agree : ∀ m n, Term.eval gcd_term m n = gcd m n := by wf_agree
 
 ## The language (`RequestProject/WFLang/PCL/Lang/`)
 
-* Types `nat`, `int`, `bool`, pairs `prod s t` and lists `list t`; typed de Bruijn variables.
+* Types `nat`, `int`, `bool`, pairs `prod s t`, lists `list t`, `option t`, sums `sum s t`,
+  `except e t`, `string`, `char`, arrays `array t` and `unit`; typed de Bruijn variables.
 * Call-free expressions (`PExpr`, `Core/PExpr.lean`): `+ - * / % ^`, shifts and bitwise
   operators, `Nat.gcd`/`Nat.lcm`/`Nat.log2`, `<`, `≤`, `bool_eq` (`==` at every type), `&&`,
   `||`, `!`, `xor`, pairing and projections, `[]`, `::`, `++`, `head`, `tail`, `isNil`,
-  `length`, `List.range`, `List.sum` (on `Nat`), casts between `Nat` and `Int`.
+  `length`, `List.range`, `List.sum` (on `Nat`), casts between `Nat` and `Int`, list indexing
+  (`xs[i]?`, `take`, `drop`), the constructors, tests and projections of `Option`, `Sum` and
+  `Except` (`some`, `isSome`, `getD`, `inl`, `isLeft`, `ok`, `isOk`, …), string and character
+  operations (`length`, `++`, `push`, `toList`, `ofList`, `Char.toNat`, `Char.ofNat`) and array
+  operations (`size`, `push`, `toList`, `ofList`, `Array.range`, `a[i]?`).
 * Statements (`Expr`), in **strict A-normal form** and **optimised normal form**:
 
   ```
@@ -111,8 +116,9 @@ It then writes a `PCL` program that reuses Lean's relation and the decreasing pr
 user's `decreasing_by`. `wf_agree` proves `Term.eval f_term = f` from the uniqueness of the fixpoint.
 The capture supports:
 
-* `if` / `match` on `Nat`, `Bool`, pairs and lists, literal patterns, `match h : e with`,
-  `cond`, `&&` / `||`;
+* `if` / `match` on `Nat`, `Bool`, `Int` (`.ofNat` / `.negSucc`), pairs, lists, `Option`, `Sum`
+  and `Except`, literal patterns, `match h : e with`, `cond`, `&&` / `||` (a `match` on an `if`
+  is pushed into its branches);
 * calls in any position (a non-tail `if`/`match` containing a call becomes
   `join j (v) := rest in if c then (…; jump j a) else (…; jump j b)`; the rest is copied into
   both branches instead only when a call in scope has a postcondition, or with
@@ -140,7 +146,10 @@ The capture supports:
     called that way does not appear in the program; `wf_agree` proves the equation by kernel
     evaluation (turn off with `set_option wfLang.foldCalls false`);
 * subtype results (postconditions) and proof parameters (preconditions);
-* mutual recursion (one global function with a tag parameter);
+* mutual recursion (one global function with a tag parameter), also when the members have
+  different parameter or result types: the parameters of all members follow the tag (each member
+  reads its own, the others are padded with default values), and different results are returned
+  as a tuple with one component per member (`Tests/MutualSignatures.lean`);
 * **well-founded `while` loops** written with `wf_while x := init while c do body termination_by μ`
   (optionally `decreasing_by tac`) or `WFLang.whileWF` (relation + invariant), from
   `Core/While.lean`. Each loop becomes one `whileLoop` (a `join` and a `joinrec`); the test and
@@ -185,18 +194,25 @@ The capture supports:
   Supported: `break`, several loops in a row, nested loops, `match`/`if` in the body, loops
   reading earlier values, callers of functions with loops. The uploaded `isqrt` (and
   `unpairLeft`/`unpairRight`), `diagonalWhile` and `mc91While` are captured this way, and
-  `diagonalWhile_eq` (omitted before) is proved. Not supported: `return` inside a
-  loop, recursive functions containing a loop, and loops without a provable measure
+  `diagonalWhile_eq` (omitted before) is proved, and so is `return` inside a loop (`findDiv`).
+  Not supported: recursive functions containing a loop, and loops without a provable measure
   (`ackWhile`, `ackNoDataStructure`, whose stack needs a multiset order).
 * `List.map`, including `List.attach.map` with recursive calls in the body, e.g.
   `((List.range n).attach.map fun ⟨i, _⟩ => underLambda i).sum` (`Tests/Map.lean`);
 * bounded `for` loops and `Nat.fold`, and function parameters specialised to the function
   passed at each call site, including recursion through a function argument
-  (`Tco.hyperWhile`, `Tco.hyperTCO`, `Tco.ack2`).
+  (`Tco.hyperWhile`, `Tco.hyperTCO`, `Tco.ack2`);
+* the list combinators `List.foldl`, `foldr`, `any`, `all`, `contains`, `elem`, `find?`,
+  `filter` and `for x in l`, rewritten into the first-order recursive functions of
+  `Core/ListLoops.lean` and specialised to their function argument (which may call the function
+  being captured: `ListComb.fsum`); `for` loops with `break` or an early `return`, and ranges
+  with a step `[a:b:s]` (`rangeLoopN`, `listLoopN`); bounded quantifiers `∀ i < n, P i`,
+  `∃ x ∈ l, P x`, … under `decide` or in the test of an `if` (`Tests/ListCombinators.lean`);
+* decrease obligations that Lean's proof no longer closes after translation (e.g. `min`
+  turned into an `if`) are retried by splitting the `if`s and calling `omega` (`nestMin`).
 
-`GAPS.md` lists what is still rejected (e.g. calls under a `fun` in library code other than
-`List.map`, such as `List.foldl`, Lean `while` loops with an early `return` or without a provable measure, and calls
-inside the body of a `wf_while`).
+`GAPS.md` lists what is still rejected (e.g. Lean `while` loops without a provable measure or
+inside a recursive function, and calls inside the body of a `wf_while`).
 `UNSUPPORTED.md` is the current assessment of everything still unsupported (types, library
 combinators, `do` features, termination arguments, evaluator limits); its rejections are pinned in
 `Tests/Unsupported.lean`.
@@ -273,6 +289,10 @@ RequestProject/WFLang.lean          imports everything
 RequestProject/WFLang/
 ├── Core/Types.lean                 Ty, Env, Var, Sig, FnType, curryEnv, BinOp, fixedRel, hoRel
 ├── Core/Loops.lean                 rangeLoop: first-order form of `for` loops and `Nat.fold`
+├── Core/ListLoops.lean             first-order forms of the list combinators (listFoldl, …),
+│                                   of bounded quantifiers, and of loops that stop early or
+│                                   step (rangeLoopN, listLoopN)
+├── Core/LibLemmas.lean             library facts used by the evaluator simp set
 ├── Core/While.lean                 well-founded `while` in Lean: whileWF, whileMeasure, `wf_while`,
 │                                   loop equation, loopVal
 ├── Core/LeanWhile.lean             LoopLaw: the unfolding law of Lean's `while` (Loop.forIn),
@@ -348,8 +368,14 @@ RequestProject/WFLang/
     ├── LeanWhile.lean              Lean's own `while`: the uploaded loops and others captured,
     │                               agreement theorems, diagonalWhile_eq, runtime checks,
     │                               rejections
-    └── Map.lean                    `List.map` and `List.attach.map` (proofs erased), with
-                                    recursive calls in the body; underLambda
+    ├── Map.lean                    `List.map` and `List.attach.map` (proofs erased), with
+    │                               recursive calls in the body; underLambda
+    ├── NewTypes.lean               Option, Sum, Except, String, Char, Array, Unit, indexing,
+    │                               match on Int: captures + agreement theorems
+    ├── ListCombinators.lean        list combinators, bounded quantifiers, `for` with
+    │                               break / return / step: captures + agreement theorems
+    ├── MutualSignatures.lean       mutual recursion with different signatures; nestMin
+    └── Unsupported.lean            what is still rejected (pinned), see UNSUPPORTED.md
 GAPS.md                             what is supported, how, and what is left
 GRAMMAR.md                          grammar layers: why join points, why no Atom layer
 CONTEXTS_ASSESSMENT.md              the design note behind removing local functions and adding

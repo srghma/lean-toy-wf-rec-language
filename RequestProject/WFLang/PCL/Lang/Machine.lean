@@ -192,6 +192,11 @@ def Expr.evalS {GL : List Fn} (ge : FEnv GL) : {Γ : List Ty} → {G : Env Γ �
       let vs := (l.eval e).attach.map fun x =>
         (body.evalS ge (x.1, e) ⟨g, x.2⟩ (Handler.push h)).run (Handler.push h) ()
       (k.evalS ge (vs, e) g (Handler.push h)).unwk
+  | _, _, _, _, _, _, .foldl _ _ l _ init _ body k, e, g, h =>
+      let r := (l.eval e).attach.foldl (fun acc x =>
+        (body.evalS ge (acc, x.1, e) ⟨g, x.2⟩ (Handler.push (Handler.push h))).run
+          (Handler.push (Handler.push h)) ()) (init.eval e)
+      (k.evalS ge (r, e) g (Handler.push h)).unwk
   | _, _, _, _, _, _, .join _ _ body m, e, g, h =>
       match m.evalS ge e g h with
       | .val r => .val r
@@ -266,6 +271,15 @@ theorem Expr.eval_val_eq_evalS {GL : List Fn} (ge : FEnv GL) {Γ : List Ty} {G :
   | map s u l hl body k ihb ihk =>
     simp only [Expr.eval, Expr.evalS, Step.unwk_run]
     rw [List.map_congr_left (fun x _ => ihb _ _ _ _)]
+    exact ihk _ _ _ _
+  | foldl s u l hl init hi body k ihb ihk =>
+    simp only [Expr.eval, Expr.evalS, Step.unwk_run]
+    have hf : (fun acc (x : {x // x ∈ l.eval e}) =>
+        (body.eval ge (acc, x.1, e) ⟨g, x.2⟩ (Handler.push (Handler.push h)) ()).1) =
+        (fun acc x => (body.evalS ge (acc, x.1, e) ⟨g, x.2⟩ (Handler.push (Handler.push h))).run
+          (Handler.push (Handler.push h)) ()) := by
+      funext acc x; exact ihb _ _ _ _
+    rw [hf]
     exact ihk _ _ _ _
   | join s P body m ihb ihm =>
     simp only [Expr.eval, Expr.evalS]

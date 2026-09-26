@@ -78,6 +78,16 @@ def Expr.firstCall {GL : List Fn} (ge : FEnv GL) : {Γ : List Ty} → {G : Env �
           body.firstCall ge (x.1, e) ⟨g, x.2⟩ (Handler.push h) ()).or
         (k.firstCall ge ((l.eval e).attach.map fun x =>
           (body.eval ge (x.1, e) ⟨g, x.2⟩ (Handler.push h) ()).1, e) g (Handler.push h) jf)
+  | _, _, sf, _, _, _, .foldl _ u l _ init _ body k, e, g, h, jf =>
+      let st := (l.eval e).attach.foldl (fun (st : Option {y : Env sf.params //
+            sf.R y (sf.cur e) ∧ sf.pre y} × u.denote) x =>
+          match st.1 with
+          | some y => (some y, st.2)
+          | none =>
+            (body.firstCall ge (st.2, x.1, e) ⟨g, x.2⟩ (Handler.push (Handler.push h)) (),
+              (body.eval ge (st.2, x.1, e) ⟨g, x.2⟩ (Handler.push (Handler.push h)) ()).1))
+          (none, init.eval e)
+      st.1.or (k.firstCall ge (st.2, e) g (Handler.push h) jf)
   | _, _, _, _, _, _, .join _ _ body m, e, g, h, jf =>
       m.firstCall ge e g h ((fun v hv => body.firstCall ge (v, e) ⟨g, hv⟩ (Handler.push h) jf), jf)
   | _, _, _, _, _, _, .joinrec _ P _ wf body m, e, g, h, jf =>
@@ -160,8 +170,11 @@ theorem joinrec_loop_unbuildable {Γ : List Ty} {G : Env Γ → Prop} {t : Ty} {
 
 end WFLang.PCL
 
-/-! The evaluator's totality is checked by Lean's kernel.  Its only axiom is `propext`, which
-comes from the library definitions of the bitwise operators `&&&`, `|||`, `^^^`, `<<<`, `>>>`
-(defined in Lean's library by well-founded recursion), not from `Expr.eval` itself. -/
-/-- info: 'WFLang.PCL.Expr.eval' depends on axioms: [propext] -/
+/-! The evaluator's totality is checked by Lean's kernel.  Its axioms come from the library
+definitions of the operators it evaluates, not from `Expr.eval` itself: `propext` from the
+bitwise operators `&&&`, `|||`, `^^^`, `<<<`, `>>>` (defined in Lean's library by well-founded
+recursion), and `Classical.choice`, `Quot.sound` from Lean's `String` library (`String.length`,
+`String.toList` are defined through proofs about UTF-8 byte arrays).  All of them are the
+standard axioms of Lean; the evaluator is still computable (it runs under `#eval`). -/
+/-- info: 'WFLang.PCL.Expr.eval' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in #print axioms WFLang.PCL.Expr.eval

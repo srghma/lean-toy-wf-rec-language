@@ -91,39 +91,46 @@ The agreement proof shows that the node computes
 | mutual recursion: `More.Mutual.isEven`/`isOdd` (structural), `downA`/`downB` (well-founded, `termination_by`), `mod3a`/`mod3b`/`mod3c` (three functions) | one global function with a tag parameter selecting the member; a call of the `i`-th member is a recursive call with tag `i`; the relation is Lean's relation for the group (on the `PSum` domain of `f._mutual`), pulled back along `(i, xs) ↦ PSum.inl/inr xs` (for structural groups: the common recursive parameter decreases) |
 | a proof precondition: `Tco.boom (n) (h : Safe n)` | a global function carries a precondition `pre`, which is part of the path condition of its body; every call proves it for its arguments. The program is a `PTerm` with precondition `Safe n`, run as `PTerm.run boom_term (n, ()) h` |
 
-## 6. Still not supported
+## 6. Lifted since the last assessment
 
-* **Calls under a binder in library code other than `List.map`** (`List.foldl`, `any`/`all`,
-  `for x in l`, …). `List.map` itself is now a statement of the grammar (`Expr.map`), and
-  `underLambda`, `((List.range n).attach.map fun ⟨i, _⟩ => underLambda i).sum`, is captured
-  (`Tests/Map.lean`): the membership proofs carried by `attach` are erased, and the program maps
-  over `List.range n` with `i ∈ List.range n` in the path condition of the body.
+These were listed as unsupported and are now captured, with agreement proofs
+(`Tests/NewTypes.lean`, `Tests/ListCombinators.lean`, `Tests/MutualSignatures.lean`,
+`Tests/LeanWhile.lean`):
+
+| example | how |
+|---|---|
+| `Option`, `Sum`, `Except`, `String`, `Char`, `Array`, `Unit` (parameters, results, intermediate values) | new object types in `Ty`, with their constructors, tests and projections as `PExpr` operators; `match` on them is a test (`isSome`, `isLeft`, `isOk`) and projections (`getD`, `getLeft`, …) |
+| `match` on `Int` (`.ofNat` / `.negSucc`) | the test `0 ≤ i` and the casts `toNat`, `(-i - 1).toNat` |
+| `l.getD i d`, `l[i]!`, `l[i]?`, `take`, `drop` | `PExpr` operators (`getElem?`, `take`, `drop`) and simp lemmas relating `getD`/`get!` to `getElem?` |
+| calls under a binder in `List.foldl`, `foldr`, `any`, `all`, `contains`, `elem`, `find?`, `filter`, `for x in l` | rewritten into the first-order recursive functions of `Core/ListLoops.lean` (`listFoldl`, …), which are specialised to their function argument like `rangeLoop`; a call of the captured function inside that argument is recursion through a function argument (`ListComb.fsum`, `anyRec`) |
+| `decide (∀ i < n, P i)`, `if ∃ x ∈ l, P x then …` | `listAll` / `listAny` over `List.range n` or `l` |
+| `for` with `break` or an early `return`; ranges with a step `[a:b:s]` | `rangeLoopN f size step start init` / `listLoopN`, whose body returns a `ForInStep`; the case split on the body is pushed into its branches, so no `ForInStep` remains in the program |
+| `return` inside Lean's `while` (`findDiv`) | the loop state holds an `Option`, now an object type |
+| mutual recursion with different parameter or result types (`mA : Nat → Nat` / `mB : Nat → Bool → Nat`; `rA : Nat → Nat` / `rB : Nat → Bool`) | the global function takes the tag, then the parameters of all members one after the other (padded with default values); different results are a tuple with one component per member; for structural groups the measure is the recursive parameter of the member selected by the tag |
+| `nestMin` (a decrease that Lean's proof no longer closes after `min` becomes an `if`) | the decrease tactic splits the `if`s of the translated goal and calls `omega` |
+
+## 7. Still not supported
+
+* **User structures and inductive types, `Fin n`, `UInt8`…`UInt64`, `Float`, `BitVec`**: not in
+  `Ty` (`Tests/Unsupported.lean`).
+* **Recursive calls inside a combinator other than `List.map` whose decrease needs the membership
+  proof of `attach`** (`Unsupported.depthSum`): the proofs are erased only for `List.map`.
 * **Function-valued parameters without a known argument**, e.g. `#lean_wf_func_to_term Tco.iter`
   on its own: the program would need function types in `Ty`. Capture a specialised copy instead.
-* **Mutually recursive functions with different parameter or result types**: the members of a
-  group must have the same signature (the tag encoding shares the parameters). Padding, as for
-  recursion through a function argument, would lift this for the parameters.
 * Restrictions of recursion through a function argument: one specialised function per captured
   function (a second, different loop whose body calls `f` is rejected); `f` and `g` must have
   the same result type; no proof parameters or subtype result; the calls of `f` inside the
   function argument may not be under a further binder.
-* **Lean's own `while` loops** are now captured through `lean_while_to_wf`
-  (`Capture/LeanWhile.lean`, `Tests/LeanWhile.lean`): each loop becomes a well-founded
-  tail-recursive function with a measure given by the user (or guessed by Lean), and agreement is
-  proved with `WFLang.loopLaw`, the unfolding law of `Lean.Loop.forIn`, which Lean v4.34 proves
-  (`Lean.Loop.forIn_eq_of_monadTail`); no hypothesis is needed. `isqrt`, `unpairLeft`, `unpairRight`, `diagonalWhile` and
-  `mc91While` are captured this way. Still rejected: `return` inside a loop, recursive functions
-  containing a loop, and `ackWhile` / `ackNoDataStructure` (no measure: the stack needs a
-  multiset order).
+* Mutually recursive functions with proof parameters or subtype results.
+* **Lean's own `while` loops** are captured through `lean_while_to_wf`
+  (`Capture/LeanWhile.lean`, `Tests/LeanWhile.lean`), including `return` inside a loop. Still
+  rejected: recursive functions containing a loop (`LeanWhileRejected.recLoop`), and
+  `ackWhile` / `ackNoDataStructure` (no measure: the stack needs a multiset order).
 * **Not well-founded definitions**: `partial def`, `partial_fixpoint`. Lean
   builds them without any termination proof (opaque implementations), so
-  there is no relation or decreasing proof to reuse. They can be captured after being rewritten
-  with the **well-founded `while`** (`wf_while … termination_by μ`, or `WFLang.whileWF` with an
-  invariant, `Core/While.lean`). The capture turns such a loop into a `PCL` `while` statement,
-  see `Tests/WhileFunctions.lean` and `Tests/While.lean`: `diagonalWhile`, `mc91While` and
-  Newton's `isqrt` are transcribed there with their measures. They can also be rewritten as
-  well-founded recursion or as a bounded `for` loop. `ackWhile` / `ackNoDataStructure` would
-  need a measure on the stack (a multiset order) and are not transcribed.
+  there is no relation or decreasing proof to reuse, and the evaluator of `PCL` is total. They
+  can be captured after being rewritten with the **well-founded `while`** (`wf_while … termination_by μ`, or
+  `WFLang.whileWF` with an invariant, `Core/While.lean`), as well-founded recursion, or as a
+  bounded `for` loop.
 * **Calls inside a well-founded `while` loop**: the test and the body of a captured loop must be
-  call-free (`WhileEx.callInBody` is rejected). The language allows calls in the body, but the
-  capture would have to prove the decrease from the callees' postconditions only.
+  call-free (`WhileEx.callInBody` is rejected).

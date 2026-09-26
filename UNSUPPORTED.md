@@ -9,7 +9,7 @@ what is **not** supported.
 How much evidence each entry has:
 
 * **[pinned]**: a test fixes the rejection with `#guard_msgs`. If the capture starts accepting
-  the function, `lake build` fails. Most of these tests are in the new file
+  the function, `lake build` fails. Most of these tests are in
   `RequestProject/WFLang/Tests/Unsupported.lean`; the others are in the test file named in the entry.
 * **[documented]**: described in earlier notes (`GAPS.md`, `STACK_OVERFLOW.md`,
   `CONTEXTS_ASSESSMENT.md`, the header comments) but not re-tested for this file.
@@ -17,6 +17,29 @@ How much evidence each entry has:
 The whole project, including `Tests/Unsupported.lean`, builds with `lake build`, with no `sorry`.
 
 ---
+
+## 0. Lifted since the previous version of this file
+
+Everything below was listed here as unsupported, and is now captured, with its agreement theorem
+proved by `wf_agree` and checked on sample inputs by `#guard`:
+
+| was unsupported | now | test |
+|---|---|---|
+| `Option`, `Except`, `Sum` (`optDown`), also only as an intermediate value (`optInside`) | object types `option t`, `sum s t`, `except e t`, with `match` on them | `Tests/NewTypes.lean` |
+| `String`, `Char` (`strLen`) | object types `string`, `char` (length, `++`, `push`, `toList`, `ofList`, `Char.toNat`, `Char.ofNat`) | `Tests/NewTypes.lean` |
+| `Array` (`arrSize`) | object type `array t` (`size`, `push`, `toList`, `ofList`, `Array.range`, `a[i]?`) | `Tests/NewTypes.lean` |
+| `Unit` | object type `unit` | `Tests/NewTypes.lean` |
+| `match` on `Int` constructors (`intCases`) | the test `0 ≤ i` and `toNat` projections | `Tests/NewTypes.lean` |
+| `List.getD`, `l[i]!` (`listGetD`, `listIdx`) | `getElem?`, `take`, `drop` operators | `Tests/NewTypes.lean` |
+| `List.foldl`, `List.contains` (`listFoldl`, `listHas3`), and `foldr`, `any`, `all`, `elem`, `find?`, `filter` | first-order recursive functions in `Core/ListLoops.lean`, specialised to the function argument | `Tests/ListCombinators.lean` |
+| a recursive call under a `fun` given to one of these combinators | recursion through a function argument (`fsum`, `anyRec`) | `Tests/ListCombinators.lean` |
+| `decide (∀ i < n, …)` (`boundedAll`); also `∃ i < n`, `∀ x ∈ l`, `∃ x ∈ l`, in `decide` or an `if` | `listAll` / `listAny` | `Tests/ListCombinators.lean` |
+| `for x in l` (`forList`) | `listFoldl`, or `listLoopN` if the body may stop | `Tests/ListCombinators.lean` |
+| `break` (`forBreak`), early `return` (`forReturn`) in a `for` loop | `rangeLoopN` / `listLoopN` (the body returns a `ForInStep`, whose case split is pushed into the branches) | `Tests/ListCombinators.lean` |
+| ranges with a step, `[0:n:2]` (`forStep`) | `rangeLoopN` with `(b - a + s - 1) / s` iterations | `Tests/ListCombinators.lean` |
+| `return` inside Lean's `while` (`findDiv`) | the loop state holds an `Option` | `Tests/LeanWhile.lean` |
+| mutual recursion with different parameter or result types (`mA`/`mB`, `rA`/`rB`) | padded parameters after the tag; a tuple of results | `Tests/MutualSignatures.lean` |
+| a decrease that Lean proves but the capture could not re-prove after translation (`nestMin`) | the decrease tactic splits the `if`s of the translated goal and calls `omega` | `Tests/MutualSignatures.lean` |
 
 ## 1. What the approach does not prove
 
@@ -29,91 +52,73 @@ The whole project, including `Tests/Unsupported.lean`, builds with `lake build`,
   captured. The boundary is the list below, found by testing.
 * **Decrease proofs are reused only in part.** The relation comes from Lean. The decrease
   obligations of the program are re-proved with Lean's own proof terms as hypotheses, but after
-  translation. When the translation changes the shape of the argument, this can fail even though
-  the goal is true (§4, `nestMin`).
+  translation, with `omega`/`simp` fallbacks (now including splitting the `if`s of the goal).
+  A decrease whose proof needs more than that can still fail after translation even though it
+  is true.
 
 ## 2. Types
 
-`Ty` has only `Nat`, `Bool`, `Int`, pairs and lists. Subtypes of these can be results, as
-postconditions, and proof arguments can be preconditions. Anything else is rejected with
-`unsupported type … (only Nat, Bool, Int, pairs, lists and subtypes of them)`.
+`Ty` has `Nat`, `Bool`, `Int`, pairs, lists, `Option`, `Sum`, `Except`, `String`, `Char`,
+`Array` and `Unit`. Subtypes of these can be results, as postconditions, and proof arguments can
+be preconditions. Anything else is rejected with `unsupported type … (only Nat, Bool, Int, String,
+Char, pairs, lists, arrays, Option, Sum, Except, Unit and subtypes of them)`.
 
 | not supported | example | evidence |
 |---|---|---|
-| `Option`, `Except`, `Sum` | `optDown : Nat → Option Nat` | [pinned] |
-| `String`, `Char` | `strLen (s : String)` | [pinned] (`String`) |
 | user structures and inductive types | `ptSum (p : Pt)` | [pinned] |
-| `Array` | `(Array.range n).size` | [pinned] |
-| `Fin n`, `UInt8`…`UInt64`, `Float`, `BitVec` | – | not in `Ty` (by reading the code) |
+| `Fin n` | `finVal (i : Fin 5)` | [pinned] |
+| `UInt8`…`UInt64` | `u64 (x : UInt64)` | [pinned] (`UInt64`) |
+| `Float`, `BitVec` | – | not in `Ty` (by reading the code) |
 | propositions as results | `Tco.Safe : Nat → Prop` | [pinned] (`Tests/Sources.lean`) |
 | function types (parameters or values) | `Tco.iter` unspecialised | [pinned] (`Tests/Sources.lean`); see §3 |
 
-The restriction also applies to **intermediate values**. `match (if n > 3 then some n else none)
-with …` is rejected even though `Option` never shows up in the signature (`optInside`, [pinned]).
-A `match` on the constructors of `Int` (`.ofNat` / `.negSucc`) is rejected too (`intCases`, [pinned]).
+The restriction also applies to intermediate values.
 
-What would lift it: sum and option types in `Ty`, with a `case` statement, would cover `Option`,
-`Except` and simple enumerations. General user inductive types would need a generic encoding
-(sums of products) plus a translation of `casesOn`/matchers into it.
+What would lift it: user structures could be encoded as nested pairs (and simple enumerations as
+sums of `unit`), but the agreement statement `Term.eval t p = f p` would then relate values of
+different types, so the capture would need an encoding function and `wf_agree` would have to go
+through it. `Fin n` depends on a value, which `Ty` does not allow; `UInt*` would need their own
+operators and overflow semantics.
 
 ## 3. Library functions, higher-order code and `do` notation
 
 The capture reads the definitions of user functions. Library functions are translated only if they
-map to one of the `PCL` operators (`+ - * / %`, `^`, shifts, bitwise, `gcd`, `lcm`, `log2`, `Int`
-arithmetic and comparisons, pairs, `::`, `++`, `head`, `tail`, `isNil`, `length`, `List.range`,
-`List.sum` on `Nat`, and a few rewrites: `min`, `max`, `∣`, `pred`, `!=`), and `List.map`, which is
-a statement of the grammar (`Expr.map`; also `List.attach.map`, whose proofs are erased: see
-`Tests/Map.lean`). Any other library call is `unsupported expression`.
+map to one of the `PCL` operators (arithmetic, comparisons, bitwise, `gcd`, `lcm`, `log2`, `Int`
+arithmetic, pairs, list, option, sum, `Except`, string, character and array operations), to
+`List.map` (a statement of the grammar), or to one of the first-order combinators of
+`Core/ListLoops.lean` (`foldl`, `foldr`, `any`, `all`, `contains`, `elem`, `find?`, `filter`,
+`for x in l`, bounded quantifiers). Any other library call is `unsupported expression`.
 
 | not supported | example | evidence |
 |---|---|---|
-| `List.foldl`, `List.contains`, `List.getD`, `l[i]!`, … | `listFoldl`, `listHas3`, `listGetD`, `listIdx` | [pinned] |
-| a recursive call under a `fun` given to a library combinator other than `List.map` | a call inside the function given to `List.foldl` | [documented] |
-| `decide` on a proposition with a bounded quantifier | `decide (∀ i < n, i * i ≠ 7)` → `unsupported condition` | [pinned] |
-| `for x in l` over a **list** | `forList` | [pinned] |
-| `break` in a `for` loop | `forBreak` | [pinned] |
-| early `return` from a `for` loop | `forReturn` | [pinned] |
-| ranges with a step, `[0:n:2]` | `forStep` | [pinned] |
+| other library functions with a function argument (`List.zipWith`, `List.partition`, `Array.foldl`, `Array.map`, …) | – | by reading the code |
+| a recursive call inside a combinator other than `List.map` whose decrease needs the membership proof of `attach` | `depthSum` (`(List.range n).attach.foldl (fun acc ⟨i, h⟩ => acc + depthSum i) 1`) | [pinned] (rejection only: the capture fails with an internal error) |
+| `for` loops in a monad other than `Id` | – | by reading the code |
 | a function parameter with no known argument | `#lean_wf_func_to_term Tco.iter` | [pinned] (`Tests/Sources.lean`) |
 
-Supported for comparison: `for i in [a:b]` in `Id` that always continues, `Nat.fold`, `let mut` with
-`if` in `do` blocks, `let rec`, `where` helpers, and a function parameter once it is specialised
-to a concrete argument.
-
-**Restrictions of recursion through a function argument** ([documented], `GAPS.md` §6): only one
+**Restrictions of recursion through a function argument** ([documented], `GAPS.md` §7): only one
 specialised function per captured function; `f` and the higher-order `g` must have the same result
 type; no proof parameters or subtype results; the calls of `f` inside the function argument may not
 be under another binder.
-
-What would lift it: first-order replacements for the other common combinators (`foldl`, `any`/`all`,
-`for x in l`, loops with early exit), like `rangeLoop` for `for` over a range, whose function
-argument receives the membership proof (`i ∈ l`) that termination proofs use.
 
 ## 4. Recursion schemes and termination arguments
 
 | not supported | example | evidence |
 |---|---|---|
-| Lean's own `while` in `do` notation with `return` inside the loop, in a recursive function, or without a provable measure | `LeanWhileRejected.findDiv`, `LeanWhileRejected.recLoop`, `Tco.ackWhile`, `Tco.ackNoDataStructure` | [pinned] (`Tests/LeanWhile.lean`, `Tests/Sources.lean`) |
+| Lean's own `while` in a recursive function, or without a provable measure | `LeanWhileRejected.recLoop`, `Tco.ackWhile`, `Tco.ackNoDataStructure` | [pinned] (`Tests/LeanWhile.lean`, `Tests/Sources.lean`) |
 | `partial def` | | [documented] |
 | `partial_fixpoint` | `pfix` → `recursive call … outside its definition` | [pinned] |
-| mutual recursion with different parameter or result types | `mA : Nat → Nat` / `mB : Nat → Bool → Nat`; `rA : Nat → Nat` / `rB : Nat → Bool` | [pinned] |
+| mutually recursive functions with proof parameters or subtype results | – | by reading the code (`fnSig`) |
 | a call inside the test or body of a well-founded `wf_while` loop | `WhileEx.callInBody` | [pinned] (`Tests/While.lean`) |
 | a termination proof that needs the *value* of a helper that is not `@[inlinable]` | `GlobalsEx.logHalfG` | [documented] (`Tests/Globals.lean`) |
-| a decrease that Lean proves but the capture cannot re-prove after translation | `nestMin` | [pinned] |
 
 Details:
 
-* **Lean's own `while`.** Supported through `lean_while_to_wf` (`Capture/LeanWhile.lean`), with
-  agreement proved by `WFLang.loopLaw` (the unfolding law of `Lean.Loop.forIn`, a theorem since
-  Lean v4.34); `isqrt`, `diagonalWhile` and `mc91While` are captured this way
-  in `Tests/LeanWhile.lean`. Not supported: `return` inside a loop (the loop state would carry an
-  early-exit value), recursive functions containing a loop, and loops without a measure.
 * **Non-well-founded definitions.** Lean builds `partial` and `partial_fixpoint` without
-  a termination proof that can be reused, so there is nothing to translate. The workaround is to
-  rewrite the loop with `wf_while … termination_by μ` or `WFLang.whileWF` (`Core/While.lean`), as
-  `Tests/WhileFunctions.lean` does for `diagonalWhile`, `mc91While` and Newton's `isqrt` (the
-  versions of these functions written with Lean's own `while` are captured directly, with proofs,
-  in `Tests/LeanWhile.lean`).
+  a termination proof that can be reused, and the evaluator of `PCL` is total, so there is
+  nothing to translate. The workaround is to rewrite the loop with `wf_while … termination_by μ`
+  or `WFLang.whileWF` (`Core/While.lean`), as `Tests/WhileFunctions.lean` does for
+  `diagonalWhile`, `mc91While` and Newton's `isqrt`, or as well-founded recursion.
   `ackWhile` / `ackNoDataStructure` would need a measure on the stack (a multiset order) and have
   not been rewritten.
 * **What a decrease proof may use.** Inside a program, a decrease proof sees only the path
@@ -122,15 +127,8 @@ Details:
   * a helper whose value the termination argument needs must be `@[inlinable]`, or must return a
     subtype that states the needed fact;
   * nested recursion (`f (f n)`) is captured only if `f` returns a subtype whose property proves
-    the outer decrease (`nestedBound` in `Tests/GapFunctions.lean`).
-* **`nestMin`.** `nestMin (n+1) = nestMin (min n (nestMin n)) + 1` terminates because
-  `min n _ ≤ n`, and Lean proves it with `omega`. The capture turns `min` into an `if` (in
-  simplified form, `if n+1 ≤ v+1 then n else v`). Lean's proof term, which talks about `n ⊓ x n ⋯`,
-  then no longer matches, and the capture reports `failed to prove termination` on a goal that is
-  true. This is a gap in the capture's proof automation, not in the language. Splitting the `if`
-  and calling `omega` on the translated goal would probably close this case, but that has not been
-  tried. It is also a case where the capture logs an error instead of failing outright, so
-  `#expect_reject` cannot be used; the test pins the full error message instead.
+    the outer decrease (`nestedBound` in `Tests/GapFunctions.lean`), or if the decrease holds
+    whatever the inner value (`nestMin`).
 
 ## 5. The evaluator at runtime
 
@@ -168,15 +166,12 @@ Details:
 
 Ordered by how many ordinary Lean functions each item would unlock, as a judgement call:
 
-1. **`Option`/sum types with a `case` statement.** `Option` is very common, even as an intermediate
-   value only.
-2. **List combinators and `for x in l` / `break` / early `return`**, via first-order loop
-   replacements (the `rangeLoop` pattern).
-3. **More robust decrease re-proofs.** Normalise `min`/`max`/`if` in the translated goal and fall
-   back to `omega`/`simp` when Lean's proof term does not match (`nestMin`).
-4. **Mutual recursion with different signatures**, by padding parameters and tagging results, as
-   is already done for recursion through a function argument.
-5. **An explicit-stack evaluator for non-tail calls** (loops and tail calls already run in
+1. **User structures**, encoded as tuples, with an encoding function in the agreement statement.
+2. **Erasing `attach` proofs for all combinators**, not only `List.map`, so that recursion over
+   the elements of a list can use `x ∈ l` in its termination proof.
+3. **More combinators** (`zipWith`, `partition`, `Array.foldl`/`map`, …) through the same
+   first-order-function pattern as `Core/ListLoops.lean`.
+4. **An explicit-stack evaluator for non-tail calls** (loops and tail calls already run in
    constant stack), or compiling programs to closures to cut the interpretive overhead.
-6. **User inductive types**: the largest change, touching `Ty`, `PExpr`, the translation and
-   `wf_agree`.
+5. **General user inductive types**: the largest change, touching `Ty`, `PExpr`, the translation
+   and `wf_agree`.

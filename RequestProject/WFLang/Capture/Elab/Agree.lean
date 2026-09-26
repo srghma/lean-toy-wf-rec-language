@@ -1,4 +1,5 @@
 import RequestProject.WFLang.Capture.Elab.Term
+import RequestProject.WFLang.Core.LibLemmas
 
 /-!
 # `wf_agree` — the agreement proof of a captured program
@@ -31,7 +32,9 @@ def agreeSimpLemmas : Array Ident :=
     mkIdent ``WFLang.rangeLoop_add_sub, mkIdent ``WFLang.fold_eq_rangeLoop,
     mkIdent ``WFLang.ite_pure_yield, mkIdent ``WFLang.PCL.eval_whileLoop,
     mkIdent ``WFLang.whileWF_eq_loopVal, mkIdent ``WFLang.whileMeasure_eq_loopVal,
-    mkIdent ``WFLang.Meta.wfFoldCalls]
+    mkIdent ``WFLang.Meta.wfFoldCalls, mkIdent ``Option.get!_eq_getD,
+    mkIdent ``List.getD_eq_getElem?_getD, mkIdent ``List.getElem!_eq_getElem?_getD,
+    mkIdent ``WFLang.array_getElem!_eq]
 
 /-- The definitions unfolding a program run (`Term.eval`, `Term.run`, `PTerm.run`) into the
 evaluation of its main statement. -/
@@ -66,19 +69,22 @@ mutual
 /-- Replace every value of a global function (`fixFn …`) or of a loop (`joinFn …`) capturing a
 callee in the main goal by the callee's value (`rewriteCalleesWith`, uniqueness lemmas
 `fixFn_unique`, `joinFn_unique`). -/
-partial def rewriteCallees (callees : Array Name) : Tactic.TacticM Unit := do
+partial def rewriteCallees (callees : Array Name) (outer : Array Lean.Expr := #[]) :
+    Tactic.TacticM Unit := do
   rewriteHOCallees callees
   rewriteCalleesWith (calleeStep callees) callees
-    (Tactic.evalTactic (← `(tactic| all_goals try $(← pclSimp):tactic)))
+    (Tactic.evalTactic (← `(tactic| all_goals try $(← pclSimp):tactic))) #[] outer
 
 /-- The rest of the proof that the callee `g` satisfies the equation of the body of its node,
 after unfolding `g` once.  (The functions identified in this proof: those of the enclosing
-proof `outer`, e.g. the global functions called in the body of a loop, and `g`'s callees.) -/
-partial def calleeStep (outer : Array Name) (g : FnRef) : Tactic.TacticM Unit := do
+proof `outer`, e.g. the global functions called in the body of a loop, and `g`'s callees; the
+values `done` identified by the enclosing proofs are left alone.) -/
+partial def calleeStep (outer : Array Name) (done : Array Lean.Expr) (g : FnRef) :
+    Tactic.TacticM Unit := do
   unfoldInlined g
   Tactic.evalTactic (← `(tactic| all_goals $(← pclSimp):tactic))
   let inner := (← calleeInfo g.name).2
-  rewriteCallees (mergeNames inner outer)
+  rewriteCallees (mergeNames inner outer) done
   Tactic.evalTactic (← `(tactic| wf_close))
 
 /-- `rewriteCallees` for the callees that call themselves inside a function argument: their

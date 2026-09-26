@@ -152,15 +152,25 @@ In the main goal, find a value `(fixFn wf body x hx).1` of a global function and
 replace it by `(je.1 (g x) _).1` (the rest of the computation `K` on the value of the callee `g`,
 uniqueness lemma `joinFn_unique`, stated for all `g h je`).  Each equation is proved by
 unfolding `g` once and running `step g`.  Repeats until no such value is left. -/
-partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees : Array Name)
-    (afterLoop : Tactic.TacticM Unit := pure ()) (done : Array Lean.Expr := #[]) :
+partial def rewriteCalleesWith (step : Array Lean.Expr → FnRef → Tactic.TacticM Unit)
+    (callees : Array Name) (afterLoop : Tactic.TacticM Unit := pure ())
+    (done : Array Lean.Expr := #[]) (outer : Array Lean.Expr := #[]) :
     Tactic.TacticM Unit := do
   if (← Tactic.getGoals).isEmpty then return
   let tgt ← Tactic.withMainContext do instantiateMVars (← Tactic.getMainTarget)
   -- (`done`: the values already rewritten; they may remain inside proofs)
-  let some fx := tgt.find? (fun x => !done.contains x && (x.isAppOfArity `WFLang.PCL.fixFn 11 ||
-      (x.isAppOfArity `WFLang.PCL.joinFn 19 &&
-        (x.getAppArgs.extract 0 14).all (!·.hasLooseBVars)))) | return
+  -- (`outer`: the values already identified by the enclosing proofs: the equation of a loop
+  -- may mention them, e.g. the value of a global function called before the loop is part of the
+  -- environment of the loop; they are left alone)
+  let done := done ++ outer
+  -- (the values of global functions first: a loop defined after a call of a global function
+  -- has that value in its environment, which the equation of the loop mentions)
+  let isFix (x : Lean.Expr) : Bool :=
+    !done.contains x && x.isAppOfArity `WFLang.PCL.fixFn 11 && !x.appFn!.appFn!.hasLooseBVars
+  let some fx := (tgt.find? isFix).orElse fun _ =>
+      tgt.find? (fun x => !done.contains x && (x.isAppOfArity `WFLang.PCL.fixFn 11 ||
+        (x.isAppOfArity `WFLang.PCL.joinFn 19 &&
+          (x.getAppArgs.extract 0 14).all (!·.hasLooseBVars)))) | return
   let isLoop := fx.isAppOf `WFLang.PCL.joinFn
   let fnStx ← Tactic.withMainContext do
     if isLoop then `(_) else exprToSyntax fx.appFn!.appFn!
@@ -246,18 +256,19 @@ partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees :
           else
             -- rewrite each member at the arguments `x.2` of the solution (the unfolded
             -- right-hand sides contain calls of the other members at other arguments)
-            let sig ← fnSig g
+            let lay ← groupLayout g.group
             let pfs ← Tactic.withMainContext do
               let fvs := (← getLCtx).getFVars
               let rest ← mkAppM ``Prod.snd #[fvs[fvs.size - 2]!]
-              let args ← (List.range sig.objPos.length).toArray.mapM (fun i => envProj rest i)
-              eqns.mapM fun e => do
-                try some <$> (exprToSyntax (← mkAppM e.getId args)) catch _ => pure none
+              (List.range eqns.size).toArray.mapM fun m => do
+                let args ← (List.range lay.sigs[m]!.argTys.length).toArray.mapM
+                  (fun i => envProj rest (lay.offs[m]! + i))
+                try some <$> (exprToSyntax (← mkAppM eqns[m]!.getId args)) catch _ => pure none
             for (e, pf?) in eqns.zip pfs do
               match pf? with
               | some pf => Tactic.evalTactic (← `(tactic| try rw [$pf:term]))
               | none => Tactic.evalTactic (← `(tactic| try rw [$e:ident]))
-          step g
+          step (done.push fx) g
         unless rest.isEmpty do throwError "could not prove the equation of {g.name}"
         let (_, mvarId) ← (← (← Tactic.getMainGoal).assert `hcallee hTy
           (← instantiateMVars pf)).intro1P
@@ -266,9 +277,12 @@ partial def rewriteCalleesWith (step : FnRef → Tactic.TacticM Unit) (callees :
       Tactic.evalTactic (← `(tactic| (simp only [$h:ident] at *); try clear $h))
       -- after a loop: evaluate the rest of the computation (which may contain further nodes)
       afterLoop
-      return ← rewriteCalleesWith step callees afterLoop (done.push fx)
-    catch _ =>
+      return ← rewriteCalleesWith step callees afterLoop
+        ((done.extract 0 (done.size - outer.size)).push fx) outer
+    catch ex =>
+      let msg ← ex.toMessageData.toString
       restoreState saved
+      trace[wfLang.agree] "{g.name}: {msg}"
   throwError "wf_agree: could not identify the function computed by{indentExpr fx.appFn!}"
 
 /-- The common skeleton of the agreement proofs for recursive functions.  The goal is first

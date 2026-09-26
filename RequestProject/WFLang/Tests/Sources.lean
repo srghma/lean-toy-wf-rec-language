@@ -205,7 +205,7 @@ first line of the error message. -/
 #expect_reject (#lean_wf_func_to_term Tco.iter : PCL.Term ⟨[.nat, .nat], .nat⟩)
 
 -- `Safe` is a proposition (`n = 1`), not a `Bool`-valued function.
-/-- info: rejected: #lean_wf_func_to_term: unsupported type Prop (only Nat, Bool, Int, pairs, lists and subtypes of them) -/
+/-- info: rejected: #lean_wf_func_to_term: unsupported type Prop (only Nat, Bool, Int, String, Char, pairs, lists, arrays, Option, Sum, Except, Unit and subtypes of them) -/
 #guard_msgs in
 #expect_reject (#lean_wf_func_to_term Tco.Safe : PCL.Term ⟨[.nat], .bool⟩)
 

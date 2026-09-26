@@ -193,7 +193,7 @@ def closedFixOfSpec (f : FnRef) : MetaM (Option (Lean.Expr × Lean.Expr × Array
       let nFixed := ys.size + (sig.objPos.filter (· < info.nFixed)).length
       let (R, wf) ← closedRel sig.argTys objXs { info with nFixed, varying }
       return some (R, wf, ← callSiteProofs info.F)
-    let some i ← structRecArg? f.name | return none
+    let some i ← recArgOrMeasure? f.name | return none
     let some j := sig.objPos.findIdx? (· == i) | return none
     let isList := (← whnfR (← inferType xs[i]!)).isAppOfArity ``List 1
     let (R, wf) ← structRel (mkTyList sig.argTys) (j + ys.size) isList
@@ -219,14 +219,28 @@ def closedFixOf (f : FnRef) : MetaM (Option (Lean.Expr × Lean.Expr × Array Lea
       let (R, wf) ← closedRelPre fn xs info.dom info.r info.hwf arg pre
       return some (R, wf, ← callSiteProofs info.F)
     -- structural recursion on parameter `i`: the relation "parameter `i` decreases" (its
-    -- value for `Nat`, its length for a list)
-    let some i ← structRecArg? fn | return none
-    let some j := sig.objPos.findIdx? (· == i) | return none
+    -- value for `Nat`, its length for a list); for a function defined by `partial_fixpoint`,
+    -- the relation "the chosen measure decreases" (`pfixMeasure?`)
+    let m ← match ← structRecArg? fn with
+      | some i =>
+        if (← whnfR (← inferType xs[i]!)).isAppOfArity ``List 1 then pure (some (PFixMeasure.len i))
+        else pure (some (PFixMeasure.val i))
+      | none => pfixMeasure? fn
+    let some m := m | return none
+    let obj (i : Nat) : Option Nat := sig.objPos.findIdx? (· == i)
     let gam := mkTyList argTys
-    let isList := (← whnfR (← inferType xs[i]!)).isAppOfArity ``List 1
-    let proj ← withLocalDeclD `e (mkApp (Lean.mkConst ``WFLang.Env) gam) fun e => do
-      let v ← envProj e j
-      mkLambdaFVars #[e] (← if isList then mkAppM ``List.length #[v] else pure v)
+    let some proj ← withLocalDeclD `e (mkApp (Lean.mkConst ``WFLang.Env) gam) fun e => do
+        match m with
+        | .val i =>
+          let some j := obj i | return none
+          return some (← mkLambdaFVars #[e] (← envProj e j))
+        | .len i =>
+          let some j := obj i | return none
+          return some (← mkLambdaFVars #[e] (← mkAppM ``List.length #[← envProj e j]))
+        | .diff a b =>
+          let (some ja, some jb) := (obj a, obj b) | return none
+          return some (← mkLambdaFVars #[e] (← mkAppM ``HSub.hSub #[← envProj e ja, ← envProj e jb]))
+      | return none
     let nat := Lean.mkConst ``Nat
     let lt := mkLambda `a .default nat <| mkLambda `b .default nat <|
       mkApp4 (Lean.mkConst ``LT.lt [0]) nat (Lean.mkConst ``instLTNat) (.bvar 1) (.bvar 0)

@@ -1,4 +1,6 @@
 import RequestProject.WFLang.Capture.Meta.Fix
+import RequestProject.WFLang.Core.ListLoops
+import RequestProject.WFLang.Core.MoreCombinators
 
 /-!
 # Capture metaprogramming: calls to other functions and bounded loops
@@ -221,6 +223,142 @@ def rangeLoopOfFold? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
     return some (← mkAppM ``WFLang.rangeLoop
       #[← mkLambdaFVars #[zs[0]!, zs[2]!] b, e.getArg! 1, mkNatLit 0, e.getArg! 3])
 
+/-- `for x in l do …` over a list (in `Id`, a body that always continues) as
+`WFLang.listFoldl (fun s x => …) init l`. -/
+def listLoopOfForIn? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
+  unless (← whnfR (e.getArg! 1)).isAppOfArity ``List 1 do return none
+  let body := e.getArg! 7
+  lambdaBoundedTelescope body 2 fun zs m => do
+    unless zs.size == 2 do return none
+    let some t ← yieldVal? m | return none
+    return some (← mkAppM ``WFLang.listFoldl #[← mkLambdaFVars #[zs[1]!, zs[0]!] t, e.getArg! 6, e.getArg! 5])
+
+/-- `for i in [a:b:s] do …` (in `Id`) whose body may stop early (`break`, `return`) or whose range
+has a step `s ≠ 1`, as `WFLang.rangeLoopN (fun i r => …) size s a init`, where `size` is the number
+of iterations `(b - a + s - 1) / s` (`Std.Legacy.Range.size`). -/
+def rangeLoopNOfForIn? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
+  unless (e.getArg! 1).isConstOf ``Std.Legacy.Range do return none
+  let r ← whnfD (e.getArg! 5)
+  unless r.isAppOfArity ``Std.Legacy.Range.mk 4 do return none
+  let start := r.getArg! 0
+  let stop := r.getArg! 1
+  let step := r.getArg! 2
+  let size ← if (← evalNat step) == some 1 then mkAppM ``HSub.hSub #[stop, start] else
+    mkAppM ``HDiv.hDiv #[← mkAppM ``HSub.hSub #[← mkAppM ``HAdd.hAdd
+      #[← mkAppM ``HSub.hSub #[stop, start], step], mkNatLit 1], step]
+  return some (← mkAppM ``WFLang.rangeLoopN #[e.getArg! 7, size, step, start, e.getArg! 6])
+
+/-- `for x in l do …` over a list (in `Id`) whose body may stop early, as
+`WFLang.listLoopN (fun x r => …) l init`. -/
+def listLoopNOfForIn? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
+  unless (← whnfR (e.getArg! 1)).isAppOfArity ``List 1 do return none
+  return some (← mkAppM ``WFLang.listLoopN #[e.getArg! 7, e.getArg! 5, e.getArg! 6])
+
+/-- The library combinators on lists with a function argument, rewritten into the first-order
+recursive functions of `Core/ListLoops.lean` (whose function argument is then specialised). -/
+def listCombinator? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
+  let args := e.getAppArgs
+  -- (a fold over `l.attach` stays: it becomes a `foldl` statement, see `Capture/Stmt.lean`)
+  if e.isAppOfArity ``List.foldl 5 && (args[4]!).consumeMData.isAppOfArity ``List.attach 2 then
+    return none
+  if e.isAppOfArity ``List.foldl 5 then
+    return some (← mkAppM ``WFLang.listFoldl #[args[2]!, args[3]!, args[4]!])
+  if e.isAppOfArity ``List.foldr 5 then
+    return some (← mkAppM ``WFLang.listFoldr #[args[2]!, args[3]!, args[4]!])
+  if e.isAppOfArity ``List.any 3 then return some (← mkAppM ``WFLang.listAny #[args[2]!, args[1]!])
+  if e.isAppOfArity ``List.all 3 then return some (← mkAppM ``WFLang.listAll #[args[2]!, args[1]!])
+  if e.isAppOfArity ``List.find? 3 then
+    return some (← mkAppM ``WFLang.listFind? #[args[1]!, args[2]!])
+  if e.isAppOfArity ``List.filter 3 then
+    return some (← mkAppM ``WFLang.listFilter #[args[1]!, args[2]!])
+  -- `l.contains a`, `List.elem a l`: `listAny (fun x => a == x) l`
+  let beqAny (α inst a l : Lean.Expr) : MetaM Lean.Expr := do
+    let p ← withLocalDeclD `x α fun x => do
+      mkLambdaFVars #[x] (mkApp4 (mkConst ``BEq.beq [← getLevel α]) α inst a x)
+    mkAppM ``WFLang.listAny #[p, l]
+  if e.isAppOfArity ``List.contains 4 then
+    return some (← beqAny args[0]! args[1]! args[3]! args[2]!)
+  if e.isAppOfArity ``List.elem 4 then
+    return some (← beqAny args[0]! args[1]! args[2]! args[3]!)
+  -- `Core/MoreCombinators.lean`
+  if e.isAppOfArity ``List.zipWith 6 then
+    return some (← mkAppM ``WFLang.listZipWith #[args[3]!, args[4]!, args[5]!])
+  if e.isAppOfArity ``List.partition 3 then
+    let p := args[1]!
+    let np ← withLocalDeclD `x args[0]! fun x => do
+      mkLambdaFVars #[x] (← mkAppM ``not #[(mkApp p x).headBeta])
+    return some (← mkAppM ``Prod.mk #[← mkAppM ``WFLang.listFilter #[p, args[2]!],
+      ← mkAppM ``WFLang.listFilter #[np, args[2]!]])
+  if e.isAppOfArity ``List.countP 3 then
+    let p := args[1]!
+    let nat := Lean.mkConst ``Nat
+    let f ← withLocalDeclD `n nat fun n => withLocalDeclD `x args[0]! fun x => do
+      let c ← mkEq (mkApp p x).headBeta (Lean.mkConst ``Bool.true)
+      mkLambdaFVars #[n, x] (← mkAppOptM ``ite #[nat, c, none,
+        ← mkAppM ``HAdd.hAdd #[n, mkNatLit 1], n])
+    return some (← mkAppM ``WFLang.listFoldl #[f, mkNatLit 0, args[2]!])
+  -- the array combinators, on the whole array (default bounds)
+  let wholeArray (a start stop : Lean.Expr) : MetaM Bool := do
+    unless (← evalNat start) == some 0 do return false
+    isDefEq stop (← mkAppM ``Array.size #[a])
+  if e.isAppOfArity ``Array.foldl 7 then
+    if ← wholeArray args[4]! args[5]! args[6]! then
+      return some (← mkAppM ``WFLang.listFoldl #[args[2]!, args[3]!, ← mkAppM ``Array.toList #[args[4]!]])
+  if e.isAppOfArity ``Array.foldr 7 then
+    if ← wholeArray args[4]! args[6]! args[5]! then
+      return some (← mkAppM ``WFLang.listFoldr #[args[2]!, args[3]!, ← mkAppM ``Array.toList #[args[4]!]])
+  if e.isAppOfArity ``Array.map 4 then
+    return some (← mkAppM ``List.toArray #[← mkAppM ``List.map #[args[2]!, ← mkAppM ``Array.toList #[args[3]!]]])
+  if e.isAppOfArity ``Array.any 5 then
+    if ← wholeArray args[1]! args[3]! args[4]! then
+      return some (← mkAppM ``WFLang.listAny #[args[2]!, ← mkAppM ``Array.toList #[args[1]!]])
+  if e.isAppOfArity ``Array.all 5 then
+    if ← wholeArray args[1]! args[3]! args[4]! then
+      return some (← mkAppM ``WFLang.listAll #[args[2]!, ← mkAppM ``Array.toList #[args[1]!]])
+  if e.isAppOfArity ``Array.contains 4 then
+    return some (← beqAny args[0]! args[1]! args[3]! (← mkAppM ``Array.toList #[args[2]!]))
+  return none
+
+/-- A proposition with a bounded quantifier, `∀ i < n, P i`, `∃ i < n, P i`, `∀ x ∈ l, P x` or
+`∃ x ∈ l, P x` (with `P` decidable), as the boolean `listAll (fun i => decide (P i)) (List.range n)`
+(resp. `listAny`, on `l`): see `Core/ListLoops.lean`. -/
+def boundedQuant? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
+  -- `(forall, bound, P)`: `bound` is `some n` for `i < n`, `none` with the list `l` for `x ∈ l`
+  let mk (isAll : Bool) (x : Lean.Expr) (dom : Lean.Expr) (bound : Lean.Expr) (isRange : Bool)
+      (P : Lean.Expr) : MetaM (Option Lean.Expr) := do
+    let some _ ← (try some <$> tyOf dom catch _ => pure none) | return none
+    let p ← (try some <$> mkLambdaFVars #[x] (← mkDecide P) catch _ => pure none)
+    let some p := p | return none
+    let l ← if isRange then mkAppM ``List.range #[bound] else pure bound
+    return some (← mkAppM (if isAll then ``WFLang.listAll else ``WFLang.listAny) #[p, l])
+  if let .forallE n dom (.forallE _ hyp body _) bi := e then
+    if body.hasLooseBVar 0 then return none
+    return ← withLocalDecl n bi dom fun x => do
+      let hyp := hyp.instantiate1 x
+      let P := body.lowerLooseBVars 1 1 |>.instantiate1 x
+      if hyp.isAppOfArity ``LT.lt 4 && (hyp.getArg! 0).isConstOf ``Nat && hyp.getArg! 2 == x &&
+          !(hyp.getArg! 3).containsFVar x.fvarId! then
+        return ← mk true x dom (hyp.getArg! 3) true P
+      if hyp.isAppOfArity ``Membership.mem 5 && hyp.getArg! 4 == x &&
+          (← whnfR (hyp.getArg! 1)).isAppOfArity ``List 1 && !(hyp.getArg! 3).containsFVar x.fvarId! then
+        return ← mk true x dom (hyp.getArg! 3) false P
+      return none
+  if e.isAppOfArity ``Exists 2 then
+    let .lam n dom body bi := e.getArg! 1 | return none
+    return ← withLocalDecl n bi dom fun x => do
+      let b := body.instantiate1 x
+      unless b.isAppOfArity ``And 2 do return none
+      let hyp := b.getArg! 0
+      let P := b.getArg! 1
+      if hyp.isAppOfArity ``LT.lt 4 && (hyp.getArg! 0).isConstOf ``Nat && hyp.getArg! 2 == x &&
+          !(hyp.getArg! 3).containsFVar x.fvarId! then
+        return ← mk false x dom (hyp.getArg! 3) true P
+      if hyp.isAppOfArity ``Membership.mem 5 && hyp.getArg! 4 == x &&
+          (← whnfR (hyp.getArg! 1)).isAppOfArity ``List 1 && !(hyp.getArg! 3).containsFVar x.fvarId! then
+        return ← mk false x dom (hyp.getArg! 3) false P
+      return none
+  return none
+
 /-- Remove the `Id` monad (`Id.run`, `bind`, `pure`) and rewrite bounded loops (`for` over a
 range, `Nat.fold`) into `WFLang.rangeLoop`, whose function argument is then specialised, and
 `while` loops with a measure (`WFLang.whileMeasure`, the notation `wf_while`) into the general
@@ -234,6 +372,17 @@ def normLoops (e : Lean.Expr) : MetaM Lean.Expr :=
     if e.isAppOfArity ``Pure.pure 4 && isId (e.getArg! 0) then return .visit (e.getArg! 3)
     if e.isAppOfArity ``ForIn.forIn 8 && isId (e.getArg! 0) then
       if let some r ← rangeLoopOfForIn? e then return .visit r
+      if let some r ← listLoopOfForIn? e then return .visit r
+      if let some r ← rangeLoopNOfForIn? e then return .visit r
+      if let some r ← listLoopNOfForIn? e then return .visit r
+    if let some r ← listCombinator? e then return .visit r
+    -- bounded quantifiers, in `decide` and in the test of an `if`
+    if e.isAppOfArity ``Decidable.decide 2 then
+      if let some r ← boundedQuant? (e.getArg! 0) then return .visit r
+    if e.isAppOfArity ``ite 5 then
+      if let some r ← boundedQuant? (e.getArg! 1) then
+        let c ← mkEq r (mkConst ``Bool.true)
+        return .visit (← mkAppOptM ``ite #[e.getArg! 0, c, none, e.getArg! 3, e.getArg! 4])
     if e.isAppOfArity ``Nat.fold 4 then
       if let some r ← rangeLoopOfFold? e then return .visit r
     -- a `while` loop with a measure: the general well-founded loop `whileWF`

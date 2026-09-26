@@ -17,6 +17,56 @@ namespace WFLang.Translate
 open Lean Meta Elab Term
 open WFLang.Meta (tyOf natBin? intBin? isLibraryConst FnSig FnRef mkSpecRef specPosAt constArity)
 
+/-- **Case of known constructor, case of `if`.**  A case split `T.casesOn x …` (with a
+non-dependent motive) whose scrutinee `x` is a constructor application is reduced (`whnfCore`),
+and one whose scrutinee is an `if c then a else b` (or `if h : c then …`) is pushed into the
+branches: `if c then T.casesOn a … else T.casesOn b …`.  Used for the bodies of loops that may
+stop early (`ForInStep.casesOn (if c then .done x else .yield y) …`, see `Core/ListLoops.lean`)
+and for `match` on an `if` in general. -/
+def pushCases? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
+  let .const n _ := e.getAppFn | return none
+  unless isCasesOnRecursor (← getEnv) n do return none
+  let .inductInfo ind ← getConstInfo n.getPrefix | return none
+  let args := e.getAppArgs
+  let motivePos := ind.numParams
+  let majorPos := ind.numParams + 1 + ind.numIndices
+  unless args.size > majorPos + ind.ctors.length do return none
+  -- the motive must not depend on the scrutinee (nor on the indices)
+  let motive := args[motivePos]!
+  let some body := (do
+    let mut m := motive
+    for _ in [0:ind.numIndices + 1] do
+      let .lam _ _ b _ := m | none
+      m := b
+    let mb := m.headBeta
+    if mb.hasLooseBVars then none else some mb) | return none
+  let major := args[majorPos]!.consumeMData
+  let withMajor (x : Lean.Expr) : Lean.Expr := mkAppN e.getAppFn (args.set! majorPos x)
+  -- a β-redex scrutinee (the body of a loop applied to its arguments): reduce it
+  if major.isHeadBetaTarget then return some (withMajor major.headBeta)
+  -- a `let` (or `have`) scrutinee: substitute it
+  if major.isLet then
+    return some (withMajor (major.letBody!.instantiate1 major.letValue!))
+  if let .const c _ := major.getAppFn then
+    if ind.ctors.contains c then
+      let r ← whnfCore e
+      return if r == e then none else some r.headBeta
+  if major.isAppOfArity ``ite 5 then
+    let margs := major.getAppArgs
+    let resTy ← if args.size == majorPos + 1 + ind.ctors.length then pure body else inferType e
+    return some (mkAppN (mkConst ``ite [← getLevel resTy])
+      #[resTy, margs[1]!, margs[2]!, withMajor margs[3]!, withMajor margs[4]!])
+  if major.isAppOfArity ``dite 5 then
+    let margs := major.getAppArgs
+    let resTy ← inferType e
+    let branch (f : Lean.Expr) : MetaM Lean.Expr := do
+      let .lam nm ty b bi := f | throwError "unexpected branch of dite"
+      withLocalDecl nm bi ty fun h => do
+        mkLambdaFVars #[h] (withMajor (b.instantiate1 h))
+    return some (mkAppN (mkConst ``dite [← getLevel resTy])
+      #[resTy, margs[1]!, margs[2]!, ← branch margs[3]!, ← branch margs[4]!])
+  return none
+
 /-- Unfold one layer of `match`/`let`, if possible.  A `match` on a pair
 (`Prod.casesOn p (fun a b => …)`) becomes the body applied to the projections of `p`. -/
 def unfoldStep? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
@@ -32,6 +82,7 @@ def unfoldStep? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
     if (← isMatcher n) then
       let v ← instantiateValueLevelParams (← getConstInfo n) lvls
       return some (v.beta e.getAppArgs).headBeta
+  if let some e' ← pushCases? e then return some e'
   return none
 
 /-- The test of a two-way branch. -/
@@ -44,10 +95,18 @@ inductive Test where
   | isZero (t : Lean.Expr)
   /-- `l = []` (`List.casesOn l …`, i.e. `match l with | [] => … | x :: xs => …`). -/
   | isNil (l : Lean.Expr)
+  /-- `o.isSome` (`match o with | some x => … | none => …`) -/
+  | isSome (o : Lean.Expr)
+  /-- `x.isLeft` (`match x with | .inl a => … | .inr b => …`) -/
+  | isLeft (x : Lean.Expr)
+  /-- `x.isOk` (`match x with | .ok a => … | .error e => …`) -/
+  | isOk (x : Lean.Expr)
+  /-- `0 ≤ i` on `Int` (`match i with | .ofNat n => … | .negSucc n => …`) -/
+  | nonneg (i : Lean.Expr)
 
 /-- The Lean term inspected by a test. -/
 def Test.expr : Test → Lean.Expr
-  | .prop e | .bool e | .isZero e | .isNil e => e
+  | .prop e | .bool e | .isZero e | .isNil e | .isSome e | .isLeft e | .isOk e | .nonneg e => e
 
 /-- The same test on another term. -/
 def Test.withExpr : Test → Lean.Expr → Test
@@ -55,6 +114,10 @@ def Test.withExpr : Test → Lean.Expr → Test
   | .bool _, e => .bool e
   | .isZero _, e => .isZero e
   | .isNil _, e => .isNil e
+  | .isSome _, e => .isSome e
+  | .isLeft _, e => .isLeft e
+  | .isOk _, e => .isOk e
+  | .nonneg _, e => .nonneg e
 
 /-- Erase the casts `h ▸ m` (`Eq.ndrec`, `Eq.rec`, `Eq.ndrec_symm`, `Eq.mpr`, `cast`) that the compilation of
 `match` inserts: with literal patterns (`| 5 => …` becomes `if h : n = 3 then h ▸ … else …`)
@@ -80,6 +143,32 @@ replaced by an erased proof: it may only be used in proofs (termination proofs, 
 properties, preconditions of calls, casts), which the translation ignores. -/
 def diteBranch (p a : Lean.Expr) (extra : Array Lean.Expr) : Lean.Expr :=
   eraseCasts (mkAppN (mkApp a (erasedProof p)) extra).headBeta
+
+/-- `Ty.default` of the object type of the Lean type `α`. -/
+def tyDefault (α : Lean.Expr) : MetaM Lean.Expr := do
+  return mkApp (mkConst ``WFLang.Ty.default) (← tyOf α)
+
+/-- The value of an option known to be `some` (`o.getD default`). -/
+def optVal (α o : Lean.Expr) : MetaM Lean.Expr := do
+  return mkApp3 (mkConst ``Option.getD [← getLevel α]) α o (← tyDefault α)
+
+/-- The values of the two sides of a sum. -/
+def sumLeft (α β x : Lean.Expr) : MetaM Lean.Expr := do
+  return mkApp4 (mkConst ``WFLang.sumGetLeftD) α β (← tyDefault α) x
+def sumRight (α β x : Lean.Expr) : MetaM Lean.Expr := do
+  return mkApp4 (mkConst ``WFLang.sumGetRightD) α β (← tyDefault β) x
+
+/-- The values of the two sides of an `Except`. -/
+def excOk (ε α x : Lean.Expr) : MetaM Lean.Expr := do
+  return mkApp4 (mkConst ``WFLang.exceptGetOkD) ε α (← tyDefault α) x
+def excError (ε α x : Lean.Expr) : MetaM Lean.Expr := do
+  return mkApp4 (mkConst ``WFLang.exceptGetErrorD) ε α (← tyDefault ε) x
+
+/-- The arguments of the two constructors of `Int` for a known `i`: `i.toNat` (for `ofNat`) and
+`(-i - 1).toNat` (for `negSucc`). -/
+def intOfNatArg (i : Lean.Expr) : MetaM Lean.Expr := mkAppM ``Int.toNat #[i]
+def intNegSuccArg (i : Lean.Expr) : MetaM Lean.Expr := do
+  mkAppM ``Int.toNat #[← mkAppM ``HSub.hSub #[← mkAppM ``Neg.neg #[i], toExpr (1 : Int)]]
 
 /-- Is `n` an auxiliary "sparse" case split (`f._sparseCasesOn_1`), which the compilation of
 overlapping patterns produces: it covers some constructors and has an `else` alternative
@@ -126,6 +215,30 @@ def sparseBranch? (e : Lean.Expr) : MetaM (Option (Test × Lean.Expr × Lean.Exp
         (mkApp (mkConst ``WFLang.Ty.default) (← tyOf α))
       let tl ← mkAppM ``List.tail #[t]
       return some (.isNil t, elseB, (mkAppN alt (#[hd, tl] ++ extra)).headBeta)
+    | some ``Option.none => return some (.isSome t, elseB, (mkAppN alt extra).headBeta)
+    | some ``Option.some => do
+      let α := (← whnfR (← inferType t)).getArg! 0
+      return some (.isSome t, (mkAppN alt (#[← optVal α t] ++ extra)).headBeta, elseB)
+    | some ``Sum.inl => do
+      let ty ← whnfR (← inferType t)
+      return some (.isLeft t,
+        (mkAppN alt (#[← sumLeft (ty.getArg! 0) (ty.getArg! 1) t] ++ extra)).headBeta, elseB)
+    | some ``Sum.inr => do
+      let ty ← whnfR (← inferType t)
+      return some (.isLeft t, elseB,
+        (mkAppN alt (#[← sumRight (ty.getArg! 0) (ty.getArg! 1) t] ++ extra)).headBeta)
+    | some ``Except.ok => do
+      let ty ← whnfR (← inferType t)
+      return some (.isOk t,
+        (mkAppN alt (#[← excOk (ty.getArg! 0) (ty.getArg! 1) t] ++ extra)).headBeta, elseB)
+    | some ``Except.error => do
+      let ty ← whnfR (← inferType t)
+      return some (.isOk t, elseB,
+        (mkAppN alt (#[← excError (ty.getArg! 0) (ty.getArg! 1) t] ++ extra)).headBeta)
+    | some ``Int.ofNat =>
+      return some (.nonneg t, (mkAppN alt (#[← intOfNatArg t] ++ extra)).headBeta, elseB)
+    | some ``Int.negSucc =>
+      return some (.nonneg t, elseB, (mkAppN alt (#[← intNegSuccArg t] ++ extra)).headBeta)
     | _ => return none
 
 /-- A two-way branch `(test, then-branch, else-branch)`.  With `shortCircuit`, `a && b` and
@@ -152,6 +265,31 @@ def branch? (e : Lean.Expr) (shortCircuit := true) :
     let tl ← mkAppM ``List.tail #[l]
     return some (.isNil l, (mkAppN args[3]! extra).headBeta,
       (mkAppN args[4]! (#[hd, tl] ++ extra)).headBeta)
+  if e.isAppOf ``Option.casesOn && args.size ≥ 5 then
+    -- `@Option.casesOn α motive o x (fun y => z)`
+    let α := args[0]!
+    let o := args[2]!
+    let extra := args.extract 5 args.size
+    return some (.isSome o, (mkAppN args[4]! (#[← optVal α o] ++ extra)).headBeta,
+      (mkAppN args[3]! extra).headBeta)
+  if e.isAppOf ``Sum.casesOn && args.size ≥ 6 then
+    -- `@Sum.casesOn α β motive x (fun a => …) (fun b => …)`
+    let (α, β, x) := (args[0]!, args[1]!, args[3]!)
+    let extra := args.extract 6 args.size
+    return some (.isLeft x, (mkAppN args[4]! (#[← sumLeft α β x] ++ extra)).headBeta,
+      (mkAppN args[5]! (#[← sumRight α β x] ++ extra)).headBeta)
+  if e.isAppOf ``Except.casesOn && args.size ≥ 6 then
+    -- `@Except.casesOn ε α motive x (fun e => …) (fun a => …)`
+    let (ε, α, x) := (args[0]!, args[1]!, args[3]!)
+    let extra := args.extract 6 args.size
+    return some (.isOk x, (mkAppN args[5]! (#[← excOk ε α x] ++ extra)).headBeta,
+      (mkAppN args[4]! (#[← excError ε α x] ++ extra)).headBeta)
+  if e.isAppOf ``Int.casesOn && args.size ≥ 4 then
+    -- `@Int.casesOn motive i (fun n => …) (fun n => …)`
+    let i := args[1]!
+    let extra := args.extract 4 args.size
+    return some (.nonneg i, (mkAppN args[2]! (#[← intOfNatArg i] ++ extra)).headBeta,
+      (mkAppN args[3]! (#[← intNegSuccArg i] ++ extra)).headBeta)
   if e.isAppOf ``Bool.casesOn && args.size ≥ 4 then
     -- `match b with | false => x | true => y`: the minor premises are in the order `false, true`
     let extra := args.extract 4 args.size
@@ -190,6 +328,13 @@ def bopT (n : Name) (tys : Array Stx) : MetaM BOp :=
 def uop (n : Name) (tys : Array Stx := #[]) : MetaM UOp :=
   return { name := n, stx := ← if tys.isEmpty then pure (mkIdent n : Stx) else `($(mkIdent n) $tys*) }
 
+/-- A unary operator of the grammar with type arguments, given by the Lean types `tys`
+(recorded, for constant folding). -/
+def uopT (n : Name) (tys : Array Lean.Expr) : MetaM UOp := do
+  let otys ← tys.mapM tyOf
+  let stxs ← otys.mapM PE.tyExprStx
+  return { name := n, stx := ← `($(mkIdent n) $stxs*), tys := otys }
+
 mutual
 /-- A call-free Lean expression as a (simplified) `PE`: every operator is built by the smart
 constructors of `Capture/Optimize.lean`, so the result is in optimised normal form. -/
@@ -219,6 +364,118 @@ partial def pexprE (c : Ctx) (e : Lean.Expr) : MetaM PE := do
   -- subtypes: a value is represented by its carrier value, the property is dropped
   if e.isAppOfArity ``Subtype.val 3 then return ← pexprE c (e.getArg! 2)
   if e.isAppOfArity ``Subtype.mk 4 then return ← pexprE c (e.getArg! 2)
+  -- `()`
+  if e.isConstOf ``Unit.unit then return .lit .unit
+  if let .const ``PUnit.unit [u] := e then
+    if u == Level.one then return .lit .unit
+  -- options, sums, `Except`
+  if e.isAppOfArity ``Option.none 1 then return .lit (.opt (← tyOf (e.getArg! 0)) none)
+  if e.isAppOfArity ``Option.some 2 then
+    return PE.mkUn (← uopT ``WFLang.UnOp.some #[e.getArg! 0]) (← pexprE c (e.getArg! 1))
+  if e.isAppOfArity ``Option.isSome 2 then
+    return PE.mkUn (← uopT ``WFLang.UnOp.isSome #[e.getArg! 0]) (← pexprE c (e.getArg! 1))
+  if e.isAppOfArity ``Option.isNone 2 then
+    return PE.mkNot (PE.mkUn (← uopT ``WFLang.UnOp.isSome #[e.getArg! 0]) (← pexprE c (e.getArg! 1)))
+  if e.isAppOfArity ``Option.getD 3 then
+    let o ← pexprE c (e.getArg! 1)
+    if (e.getArg! 2).isAppOfArity ``WFLang.Ty.default 1 then
+      return PE.mkUn (← uopT ``WFLang.UnOp.optGet #[e.getArg! 0]) o
+    return PE.mkBin (← bopT ``WFLang.BinOp.optGetD #[← tyStx (e.getArg! 0)]) o
+      (← pexprE c (e.getArg! 2))
+  if e.isAppOfArity ``Option.get! 3 then
+    return PE.mkBin (← bopT ``WFLang.BinOp.optGetD #[← tyStx (e.getArg! 0)])
+      (← pexprE c (e.getArg! 2)) (← pexprE c (← mkAppOptM ``Inhabited.default #[e.getArg! 0, e.getArg! 1]))
+  -- the default value of an object type (padding in the results of a group of mutually
+  -- recursive functions)
+  if e.isAppOfArity ``WFLang.Ty.default 1 then
+    if let some v := LitVal.default (e.getArg! 0) then return .lit v
+  if e.isAppOfArity ``Inhabited.default 2 then
+    let v ← whnfD e
+    if v != e then return ← pexprE c v
+  if e.isAppOfArity ``Sum.inl 3 then
+    return PE.mkUn (← uopT ``WFLang.UnOp.inl #[e.getArg! 0, e.getArg! 1]) (← pexprE c (e.getArg! 2))
+  if e.isAppOfArity ``Sum.inr 3 then
+    return PE.mkUn (← uopT ``WFLang.UnOp.inr #[e.getArg! 0, e.getArg! 1]) (← pexprE c (e.getArg! 2))
+  if e.isAppOfArity ``Sum.isLeft 3 then
+    return PE.mkUn (← uopT ``WFLang.UnOp.isLeft #[e.getArg! 0, e.getArg! 1]) (← pexprE c (e.getArg! 2))
+  if e.isAppOfArity ``Sum.isRight 3 then
+    return PE.mkNot (PE.mkUn (← uopT ``WFLang.UnOp.isLeft #[e.getArg! 0, e.getArg! 1])
+      (← pexprE c (e.getArg! 2)))
+  for (n, op) in [(``WFLang.sumGetLeftD, ``WFLang.UnOp.getLeft),
+      (``WFLang.sumGetRightD, ``WFLang.UnOp.getRight),
+      (``WFLang.exceptGetOkD, ``WFLang.UnOp.getOk),
+      (``WFLang.exceptGetErrorD, ``WFLang.UnOp.getError)] do
+    if e.isAppOfArity n 4 && (e.getArg! 2).isAppOfArity ``WFLang.Ty.default 1 then
+      return PE.mkUn (← uopT op #[e.getArg! 0, e.getArg! 1]) (← pexprE c (e.getArg! 3))
+  if e.isAppOfArity ``Except.ok 3 then
+    return PE.mkUn (← uopT ``WFLang.UnOp.ok #[e.getArg! 0, e.getArg! 1]) (← pexprE c (e.getArg! 2))
+  if e.isAppOfArity ``Except.error 3 then
+    return PE.mkUn (← uopT ``WFLang.UnOp.error #[e.getArg! 0, e.getArg! 1]) (← pexprE c (e.getArg! 2))
+  if e.isAppOfArity ``Except.toBool 3 || e.isAppOfArity ``Except.isOk 3 then
+    return PE.mkUn (← uopT ``WFLang.UnOp.isOk #[e.getArg! 0, e.getArg! 1]) (← pexprE c (e.getArg! 2))
+  -- strings and characters
+  if let .lit (.strVal str) := e then return .lit (.str str)
+  if e.isAppOfArity ``String.length 1 then
+    return PE.mkUn (← uop ``WFLang.UnOp.strLength) (← pexprE c (e.getArg! 0))
+  if e.isAppOfArity ``String.toList 1 then
+    return PE.mkUn (← uop ``WFLang.UnOp.strToList) (← pexprE c (e.getArg! 0))
+  if e.isAppOfArity ``String.ofList 1 then
+    return PE.mkUn (← uop ``WFLang.UnOp.strOfList) (← pexprE c (e.getArg! 0))
+  if e.isAppOfArity ``String.push 2 then
+    return PE.mkBin (← bop ``WFLang.BinOp.strPush) (← pexprE c (e.getArg! 0)) (← pexprE c (e.getArg! 1))
+  if e.isAppOfArity ``String.append 2 then
+    return PE.mkBin (← bop ``WFLang.BinOp.strAppend) (← pexprE c (e.getArg! 0)) (← pexprE c (e.getArg! 1))
+  if e.isAppOfArity ``HAppend.hAppend 6 && (← whnfR (e.getArg! 0)).isConstOf ``String then
+    return PE.mkBin (← bop ``WFLang.BinOp.strAppend) (← pexprE c (e.getArg! 4)) (← pexprE c (e.getArg! 5))
+  if e.isAppOfArity ``Char.ofNat 1 then
+    return PE.mkUn (← uop ``WFLang.UnOp.charOfNat) (← pexprE c (e.getArg! 0))
+  if e.isAppOfArity ``Char.toNat 1 then
+    return PE.mkUn (← uop ``WFLang.UnOp.charToNat) (← pexprE c (e.getArg! 0))
+  -- arrays
+  if e.isAppOfArity ``Array.size 2 then
+    return PE.mkUn (← uopT ``WFLang.UnOp.arrSize #[e.getArg! 0]) (← pexprE c (e.getArg! 1))
+  if e.isAppOfArity ``Array.toList 2 then
+    return PE.mkUn (← uopT ``WFLang.UnOp.arrToList #[e.getArg! 0]) (← pexprE c (e.getArg! 1))
+  if e.isAppOfArity ``List.toArray 2 then
+    return PE.mkUn (← uopT ``WFLang.UnOp.arrOfList #[e.getArg! 0]) (← pexprE c (e.getArg! 1))
+  if e.isAppOfArity ``Array.push 3 then
+    return PE.mkBin (← bopT ``WFLang.BinOp.arrPush #[← tyStx (e.getArg! 0)])
+      (← pexprE c (e.getArg! 1)) (← pexprE c (e.getArg! 2))
+  if e.isAppOfArity ``Array.range 1 then
+    return PE.mkUn (← uop ``WFLang.UnOp.arrRange) (← pexprE c (e.getArg! 0))
+  -- indexing: `xs[i]?`, `xs[i]!`, `xs[i]` on lists and arrays, `List.getD`, `List.head?`
+  if e.isAppOfArity ``GetElem?.getElem? 7 || e.isAppOfArity ``GetElem?.getElem! 8 ||
+      e.isAppOfArity ``GetElem.getElem 8 then
+    let coll ← whnfR (e.getArg! 0)
+    let n := e.getAppNumArgs
+    let isBang := e.isAppOfArity ``GetElem?.getElem! 8
+    let isGet := e.isAppOfArity ``GetElem.getElem 8
+    let (xs, i) := if isGet then (e.getArg! 5, e.getArg! 6) else (e.getArg! (n - 2), e.getArg! (n - 1))
+    let some (α, op) := (if coll.isAppOfArity ``List 1 then some (coll.getArg! 0, ``WFLang.BinOp.getElem?)
+      else if coll.isAppOfArity ``Array 1 then some (coll.getArg! 0, ``WFLang.BinOp.arrGetElem?)
+      else none) | throwError "#lean_wf_func_to_term: unsupported expression{indentExpr e}"
+    let o := PE.mkBin (← bopT op #[← tyStx α]) (← pexprE c xs) (← pexprE c i)
+    if isBang then
+      return PE.mkBin (← bopT ``WFLang.BinOp.optGetD #[← tyStx α]) o
+        (← pexprE c (← mkAppOptM ``Inhabited.default #[α, e.getArg! 5]))
+    if isGet then return PE.mkUn (← uopT ``WFLang.UnOp.optGet #[α]) o
+    return o
+  if e.isAppOfArity ``List.getD 4 then
+    let o := PE.mkBin (← bopT ``WFLang.BinOp.getElem? #[← tyStx (e.getArg! 0)])
+      (← pexprE c (e.getArg! 1)) (← pexprE c (e.getArg! 2))
+    return PE.mkBin (← bopT ``WFLang.BinOp.optGetD #[← tyStx (e.getArg! 0)]) o (← pexprE c (e.getArg! 3))
+  if e.isAppOfArity ``List.head? 2 then
+    -- `if l.isEmpty then none else some (l.headD default)`
+    let α := e.getArg! 0
+    let l ← pexprE c (e.getArg! 1)
+    return PE.mkIte (PE.mkUn (← uop ``WFLang.UnOp.isNil #[← tyStx α]) l) (.lit (.opt (← tyOf α) none))
+      (PE.mkUn (← uopT ``WFLang.UnOp.some #[α]) (PE.mkUn (← uop ``WFLang.UnOp.head #[← tyStx α]) l))
+  if e.isAppOfArity ``List.take 3 then
+    return PE.mkBin (← bopT ``WFLang.BinOp.take #[← tyStx (e.getArg! 0)])
+      (← pexprE c (e.getArg! 1)) (← pexprE c (e.getArg! 2))
+  if e.isAppOfArity ``List.drop 3 then
+    return PE.mkBin (← bopT ``WFLang.BinOp.drop #[← tyStx (e.getArg! 0)])
+      (← pexprE c (e.getArg! 1)) (← pexprE c (e.getArg! 2))
   -- `Int` operators and conversions
   if e.isAppOfArity ``Neg.neg 3 && (e.getArg! 0).isConstOf ``Int then
     return PE.mkUn (← uop ``WFLang.UnOp.ineg) (← pexprE c (e.getArg! 2))
@@ -338,6 +595,17 @@ partial def testE (c : Ctx) : Test → MetaM PE
     return PE.mkBin (← bopT ``WFLang.BinOp.beq #[← `(WFLang.Ty.nat)]) (← pexprE c t) (PE.natLit 0)
   | .isNil l => do
     return PE.mkUn (← uop ``WFLang.UnOp.isNil #[← elemTyStx (← inferType l)]) (← pexprE c l)
+  | .isSome o => do
+    let ty ← whnfR (← inferType o)
+    return PE.mkUn (← uopT ``WFLang.UnOp.isSome #[ty.getArg! 0]) (← pexprE c o)
+  | .isLeft x => do
+    let ty ← whnfR (← inferType x)
+    return PE.mkUn (← uopT ``WFLang.UnOp.isLeft #[ty.getArg! 0, ty.getArg! 1]) (← pexprE c x)
+  | .isOk x => do
+    let ty ← whnfR (← inferType x)
+    return PE.mkUn (← uopT ``WFLang.UnOp.isOk #[ty.getArg! 0, ty.getArg! 1]) (← pexprE c x)
+  | .nonneg i => do
+    return PE.mkBin (← bop ``WFLang.BinOp.ile) (.lit (.int 0)) (← pexprE c i)
 end
 
 /-- A call-free Lean expression as `PExpr` syntax (in optimised normal form). -/

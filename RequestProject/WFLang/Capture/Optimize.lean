@@ -35,6 +35,17 @@ inductive LitVal where
   /-- a list literal, with the object type (`WFLang.Ty` expression) of its elements -/
   | list (elemTy : Lean.Expr) (xs : List LitVal)
   | pair (a b : LitVal)
+  /-- an option literal, with the object type of its value -/
+  | opt (t : Lean.Expr) (v : Option LitVal)
+  /-- `Sum.inl v` / `Sum.inr v` (`left = true` for `inl`), with the two object types -/
+  | sum (s t : Lean.Expr) (left : Bool) (v : LitVal)
+  /-- `Except.ok v` / `Except.error v` (`ok = true` for `ok`), with the two object types -/
+  | exc (e t : Lean.Expr) (ok : Bool) (v : LitVal)
+  | str (s : String)
+  | char (c : Char)
+  /-- an array literal, with the object type of its elements -/
+  | arr (elemTy : Lean.Expr) (xs : List LitVal)
+  | unit
   deriving Inhabited
 
 namespace LitVal
@@ -46,6 +57,13 @@ partial def ty : LitVal → Lean.Expr
   | .bool _ => mkConst ``WFLang.Ty.bool
   | .list t _ => mkApp (mkConst ``WFLang.Ty.list) t
   | .pair a b => mkApp2 (mkConst ``WFLang.Ty.prod) a.ty b.ty
+  | .opt t _ => mkApp (mkConst ``WFLang.Ty.option) t
+  | .sum s t _ _ => mkApp2 (mkConst ``WFLang.Ty.sum) s t
+  | .exc e t _ _ => mkApp2 (mkConst ``WFLang.Ty.except) e t
+  | .str _ => mkConst ``WFLang.Ty.string
+  | .char _ => mkConst ``WFLang.Ty.char
+  | .arr t _ => mkApp (mkConst ``WFLang.Ty.array) t
+  | .unit => mkConst ``WFLang.Ty.unit
 
 /-- Equality of literal values. -/
 partial def eqv : LitVal → LitVal → Bool
@@ -54,6 +72,14 @@ partial def eqv : LitVal → LitVal → Bool
   | .bool a, .bool b => a == b
   | .list _ xs, .list _ ys => xs.length == ys.length && (xs.zip ys).all fun (x, y) => eqv x y
   | .pair a b, .pair c d => eqv a c && eqv b d
+  | .opt _ none, .opt _ none => true
+  | .opt _ (some a), .opt _ (some b) => eqv a b
+  | .sum _ _ l a, .sum _ _ r b => l == r && eqv a b
+  | .exc _ _ l a, .exc _ _ r b => l == r && eqv a b
+  | .str a, .str b => a == b
+  | .char a, .char b => a == b
+  | .arr _ xs, .arr _ ys => xs.length == ys.length && (xs.zip ys).all fun (x, y) => eqv x y
+  | .unit, .unit => true
   | _, _ => false
 
 /-- The default value (`WFLang.Ty.default`) of an object type. -/
@@ -64,6 +90,15 @@ partial def default (t : Lean.Expr) : Option LitVal :=
   else if t.isAppOfArity ``WFLang.Ty.list 1 then some (.list (t.getArg! 0) [])
   else if t.isAppOfArity ``WFLang.Ty.prod 2 then
     return .pair (← default (t.getArg! 0)) (← default (t.getArg! 1))
+  else if t.isAppOfArity ``WFLang.Ty.option 1 then some (.opt (t.getArg! 0) none)
+  else if t.isAppOfArity ``WFLang.Ty.sum 2 then
+    return .sum (t.getArg! 0) (t.getArg! 1) true (← default (t.getArg! 0))
+  else if t.isAppOfArity ``WFLang.Ty.except 2 then
+    return .exc (t.getArg! 0) (t.getArg! 1) false (← default (t.getArg! 0))
+  else if t.isConstOf ``WFLang.Ty.string then some (.str "")
+  else if t.isConstOf ``WFLang.Ty.char then some (.char (Inhabited.default : Char))
+  else if t.isAppOfArity ``WFLang.Ty.array 1 then some (.arr (t.getArg! 0) [])
+  else if t.isConstOf ``WFLang.Ty.unit then some .unit
   else none
 
 end LitVal
@@ -73,10 +108,12 @@ structure BOp where
   name : Name
   stx : TSyntax `term
 
-/-- A unary operator: its `WFLang.UnOp` constructor and its syntax. -/
+/-- A unary operator: its `WFLang.UnOp` constructor and its syntax (and, for the constructors
+of sums and `Except`, the object types of its type arguments). -/
 structure UOp where
   name : Name
   stx : TSyntax `term
+  tys : Array Lean.Expr := #[]
 
 /-- Meta-level call-free expressions, as the translation builds them. -/
 inductive PE where
@@ -141,11 +178,20 @@ def evalBin (op : Name) (a b : LitVal) : Option LitVal :=
   | ``WFLang.BinOp.pair, x, y => some (.pair x y)
   | ``WFLang.BinOp.cons, x, .list t xs => some (.list t (x :: xs))
   | ``WFLang.BinOp.append, .list t xs, .list _ ys => some (.list t (xs ++ ys))
+  | ``WFLang.BinOp.getElem?, .list t xs, .nat i => some (.opt t xs[i]?)
+  | ``WFLang.BinOp.take, .list t xs, .nat i => some (.list t (xs.take i))
+  | ``WFLang.BinOp.drop, .list t xs, .nat i => some (.list t (xs.drop i))
+  | ``WFLang.BinOp.optGetD, .opt _ v, d => some (v.getD d)
+  | ``WFLang.BinOp.strAppend, .str a, .str b => some (.str (a ++ b))
+  | ``WFLang.BinOp.strPush, .str a, .char c => some (.str (a.push c))
+  | ``WFLang.BinOp.arrPush, .arr t xs, x => some (.arr t (xs ++ [x]))
+  | ``WFLang.BinOp.arrGetElem?, .arr t xs, .nat i => some (.opt t xs[i]?)
   | _, _, _ => none
 
 /-- The value of a unary operator on a literal. -/
-def evalUn (op : Name) (a : LitVal) : Option LitVal :=
-  match op, a with
+def evalUn (uop : UOp) (a : LitVal) : Option LitVal :=
+  let ty (i : Nat) : Option Lean.Expr := uop.tys[i]?
+  match uop.name, a with
   | ``WFLang.UnOp.log2, .nat x => some (.nat (Nat.log2 x))
   | ``WFLang.UnOp.ineg, .int x => some (.int (-x))
   | ``WFLang.UnOp.toNat, .int x => some (.nat x.toNat)
@@ -164,6 +210,30 @@ def evalUn (op : Name) (a : LitVal) : Option LitVal :=
     xs.foldr (fun x acc => match x, acc with
       | .nat a, some (.nat b) => some (.nat (a + b))
       | _, _ => none) (some (.nat 0))
+  | ``WFLang.UnOp.some, x => some (.opt x.ty (some x))
+  | ``WFLang.UnOp.isSome, .opt _ v => some (.bool v.isSome)
+  | ``WFLang.UnOp.optGet, .opt t v => v <|> LitVal.default t
+  | ``WFLang.UnOp.inl, x => return .sum x.ty (← ty 1) true x
+  | ``WFLang.UnOp.inr, x => return .sum (← ty 0) x.ty false x
+  | ``WFLang.UnOp.isLeft, .sum _ _ l _ => some (.bool l)
+  | ``WFLang.UnOp.getLeft, .sum s _ l v => if l then some v else LitVal.default s
+  | ``WFLang.UnOp.getRight, .sum _ t l v => if l then LitVal.default t else some v
+  | ``WFLang.UnOp.ok, x => return .exc (← ty 0) x.ty true x
+  | ``WFLang.UnOp.error, x => return .exc x.ty (← ty 1) false x
+  | ``WFLang.UnOp.isOk, .exc _ _ o _ => some (.bool o)
+  | ``WFLang.UnOp.getOk, .exc _ t o v => if o then some v else LitVal.default t
+  | ``WFLang.UnOp.getError, .exc e _ o v => if o then LitVal.default e else some v
+  | ``WFLang.UnOp.strLength, .str s => some (.nat s.length)
+  | ``WFLang.UnOp.strToList, .str s => some (.list (mkConst ``WFLang.Ty.char) (s.toList.map LitVal.char))
+  | ``WFLang.UnOp.strOfList, .list _ cs =>
+    (cs.mapM fun | LitVal.char c => some c | _ => none).map fun cs => LitVal.str (String.ofList cs)
+  | ``WFLang.UnOp.charToNat, .char c => some (.nat c.toNat)
+  | ``WFLang.UnOp.charOfNat, .nat n => some (.char (Char.ofNat n))
+  | ``WFLang.UnOp.arrSize, .arr _ xs => some (.nat xs.length)
+  | ``WFLang.UnOp.arrToList, .arr t xs => some (.list t xs)
+  | ``WFLang.UnOp.arrOfList, .list t xs => some (.arr t xs)
+  | ``WFLang.UnOp.arrRange, .nat n =>
+    if n ≤ 32 then some (.arr (mkConst ``WFLang.Ty.nat) ((List.range n).map .nat)) else none
   | _, _ => none
 
 /-- `!a`, simplified. -/
@@ -227,7 +297,7 @@ def mkBin (op : BOp) (a b : PE) : PE := Id.run do
 /-- `op a`, simplified. -/
 def mkUn (op : UOp) (a : PE) : PE := Id.run do
   if let .lit x := a then
-    if let some v := evalUn op.name x then return .lit v
+    if let some v := evalUn op x then return .lit v
   match op.name, a with
   | ``WFLang.UnOp.fst, .bin p x _ => if p.name == ``WFLang.BinOp.pair then return x
   | ``WFLang.UnOp.snd, .bin p _ y => if p.name == ``WFLang.BinOp.pair then return y
@@ -257,6 +327,17 @@ partial def tyExprStx (t : Lean.Expr) : MetaM (TSyntax `term) := do
     return ← `(WFLang.Ty.prod $(← tyExprStx (t.getArg! 0)) $(← tyExprStx (t.getArg! 1)))
   if t.isAppOfArity ``WFLang.Ty.list 1 then
     return ← `(WFLang.Ty.list $(← tyExprStx (t.getArg! 0)))
+  if t.isAppOfArity ``WFLang.Ty.option 1 then
+    return ← `(WFLang.Ty.option $(← tyExprStx (t.getArg! 0)))
+  if t.isAppOfArity ``WFLang.Ty.sum 2 then
+    return ← `(WFLang.Ty.sum $(← tyExprStx (t.getArg! 0)) $(← tyExprStx (t.getArg! 1)))
+  if t.isAppOfArity ``WFLang.Ty.except 2 then
+    return ← `(WFLang.Ty.except $(← tyExprStx (t.getArg! 0)) $(← tyExprStx (t.getArg! 1)))
+  if t.isConstOf ``WFLang.Ty.string then return ← `(WFLang.Ty.string)
+  if t.isConstOf ``WFLang.Ty.char then return ← `(WFLang.Ty.char)
+  if t.isConstOf ``WFLang.Ty.unit then return ← `(WFLang.Ty.unit)
+  if t.isAppOfArity ``WFLang.Ty.array 1 then
+    return ← `(WFLang.Ty.array $(← tyExprStx (t.getArg! 0)))
   throwError "#lean_wf_func_to_term: unexpected object type {t}"
 
 /-- The Lean value of a literal, as syntax. -/
@@ -271,6 +352,26 @@ partial def _root_.WFLang.Translate.LitVal.valStx : LitVal → MetaM (TSyntax `t
       acc ← `(List.cons $(← x.valStx) $acc)
     return acc
   | .pair a b => do `(Prod.mk $(← a.valStx) $(← b.valStx))
+  | .opt t none => do `(@Option.none (WFLang.Ty.denote $(← tyExprStx t)))
+  | .opt t (some v) => do `(@Option.some (WFLang.Ty.denote $(← tyExprStx t)) $(← v.valStx))
+  | .sum s t l v => do
+    let s' ← tyExprStx s
+    let t' ← tyExprStx t
+    if l then `(@Sum.inl (WFLang.Ty.denote $s') (WFLang.Ty.denote $t') $(← v.valStx))
+    else `(@Sum.inr (WFLang.Ty.denote $s') (WFLang.Ty.denote $t') $(← v.valStx))
+  | .exc e t o v => do
+    let e' ← tyExprStx e
+    let t' ← tyExprStx t
+    if o then `(@Except.ok (WFLang.Ty.denote $e') (WFLang.Ty.denote $t') $(← v.valStx))
+    else `(@Except.error (WFLang.Ty.denote $e') (WFLang.Ty.denote $t') $(← v.valStx))
+  | .str s => `(($(quote s) : String))
+  | .char c => `((Char.ofNat $(quote c.toNat)))
+  | .arr t xs => do
+    let mut acc ← `(@List.nil (WFLang.Ty.denote $(← tyExprStx t)))
+    for x in xs.reverse do
+      acc ← `(List.cons $(← x.valStx) $acc)
+    `(List.toArray $acc)
+  | .unit => `(Unit.unit)
 
 /-- Syntax of a de Bruijn variable. -/
 def varStx : Nat → MetaM (TSyntax `term)

@@ -340,17 +340,29 @@ open Tco.AckWithoutStackButUsingCantorPairing
 
 end
 
-/-! ## Still rejected -/
+/-! ## `return` inside the loop
 
-namespace LeanWhileRejected
+The loop state holds an `Option` (the value returned early), which is now an object type. -/
 
-/-- `return` inside the loop: the loop state holds an `Option` (not a `PCL` type). -/
+namespace LeanWhileEx
+
 def findDiv (n : Nat) : Nat := Id.run do
   let mut d := 2
   while d < n do
     if n % d == 0 then return d
     d := d + 1
   return n
+
+end LeanWhileEx
+
+def findDiv_term : PCL.Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term LeanWhileEx.findDiv
+theorem findDiv_agree : ∀ n, PCL.Term.eval findDiv_term n = LeanWhileEx.findDiv n := by wf_agree
+
+#guard (List.range 30).all fun n => PCL.Term.eval findDiv_term n == LeanWhileEx.findDiv n
+
+/-! ## Still rejected -/
+
+namespace LeanWhileRejected
 
 /-- A recursive function containing a loop. -/
 def recLoop : Nat → Nat
@@ -363,9 +375,6 @@ def recLoop : Nat → Nat
 
 end LeanWhileRejected
 
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term LeanWhileRejected.findDiv : PCL.Term ⟨[.nat], .nat⟩)
 
 /-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
 #guard_msgs in

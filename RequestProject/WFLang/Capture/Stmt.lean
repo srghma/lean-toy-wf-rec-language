@@ -53,6 +53,8 @@ partial def lift (c : Ctx) (e : Lean.Expr) (k : Ctx → Lean.Expr → TermElabM 
   if e.isAppOfArity ``WFLang.whileWF 9 then return ← whileStx c e k
   -- `List.map f l` (also `l.attach.map f`): `let v := map (fun x => ⟦f x⟧) l in k`
   if e.isAppOfArity ``List.map 4 then return ← mapStx c e k
+  -- `l.attach.foldl f init`: `let v := foldl (fun acc x => ⟦f acc x⟧) init l in k`
+  if isAttachFoldl e then return ← foldlStx c e k
   -- a call of `f` or of the specialised `g`, in the global function capturing both
   if let some h := c.ho then
     if let some args ← hoSelfArgs? c h e then
@@ -68,6 +70,19 @@ partial def lift (c : Ctx) (e : Lean.Expr) (k : Ctx → Lean.Expr → TermElabM 
   if e.isApp && (e.getAppFn.isConstOf c.fn || c.group.any e.getAppFn.isConstOf) then
     let some sig := c.fnSig? |
       throwError "#lean_wf_func_to_term: recursive call of {c.fn} outside its definition"
+    -- in a group of mutually recursive functions with different signatures: the tag, then the
+    -- arguments padded to the parameters of the group; the value is the component of the callee
+    if let some lay := c.groupLay? then
+      let some i := c.group.findIdx? e.getAppFn.isConstOf |
+        throwError "#lean_wf_func_to_term: unexpected call{indentExpr e}"
+      unless e.getAppNumArgs == lay.sigs[i]!.arity do
+        throwError "#lean_wf_func_to_term: partial application of {e.getAppFn} (function values are not supported){indentExpr e}"
+      return ← liftMany c (mkNatLit i :: e.getAppArgs.toList) [] fun c vals => do
+        withLocalDeclD `r (← lay.retLeanTy) fun v => do
+          let rest ← k { c with vars := v.fvarId! :: c.vars } (← lay.proj i v)
+          `(WFLang.PCL.Expr.fixSelfCall
+              $(← pargsOpt c (some vals.head! :: lay.callArgs i vals.tail))
+              (by decide) $(← decStx c) (fun _ _ => trivial) $rest)
     -- in a group of mutually recursive functions: the tag of the callee comes first
     let tag := (c.group.findIdx? e.getAppFn.isConstOf).map mkNatLit
     unless e.getAppNumArgs == sig.arity do
@@ -92,6 +107,16 @@ partial def lift (c : Ctx) (e : Lean.Expr) (k : Ctx → Lean.Expr → TermElabM 
     if kind == .loop then
       return ← loopStx c { name := g } sig (objArgs sig e.getAppArgs) e k
     let gi ← c.gref (← calleeKey g)
+    -- a member of a group of mutually recursive functions with different signatures
+    if let (some i, some grp) := (sig.tag, ← mutualGroup? g) then
+      let lay ← groupLayout grp
+      if !lay.shared || !lay.sameRet then
+        return ← liftMany c (mkNatLit i :: e.getAppArgs.toList) [] fun c vals => do
+          withLocalDeclD `r (← lay.retLeanTy) fun v => do
+            let rest ← k { c with vars := v.fvarId! :: c.vars } (← lay.proj i v)
+            let pa ← pargsOpt c ((if gi.tag0 then [some (mkNatLit 0)] else []) ++
+              some vals.head! :: lay.callArgs i vals.tail ++ List.replicate gi.pad none)
+            `(WFLang.PCL.Expr.gCall $(gvarStx gi.pos) $pa (by decide) (fun _ _ => trivial) $rest)
     return ← gCallStx c gi sig ((sig.tag.map mkNatLit).toList ++ objArgs sig e.getAppArgs) e k
   -- a call of a function with function arguments: the copy specialised to these arguments,
   -- which takes the lifted variables as extra arguments (a loop if it is tail-recursive)
@@ -206,7 +231,8 @@ partial def loopParts (c : Ctx) (ref : FnRef) (sig : FnSig) (d v0 : Nat) :
         callees := ← calleeKinds ref.name rhs, fnSig? := none, hasPost := false, group := #[],
         specFns := ← specFnsIn ref.name rhs, selfExtra := [],
         selfSpec := (sig.specPos.map (xs[·]!)).map (·.replaceFVars params projs),
-        ho := none, hoFound := none, joins := (v0 + 1) :: v0 :: c.joins,
+        ho := none, hoFound := none, joins := (v0 + 1) :: v0 :: c.joins, groupLay? := none,
+        retInj? := none,
         loop? := some { ref, sig, dL := d + 1, vL := v0 + 1,
                         extra := (projs.extract 0 ys.size).toList },
         exitK := some (d, v0) }
@@ -281,7 +307,7 @@ partial def mapStx (c : Ctx) (e : Lean.Expr) (k : Ctx → Lean.Expr → TermElab
     let body ← withLocalDeclD `x α fun x => do
       let c' : Ctx := { c with
         vars := x.fvarId! :: c.vars, joins := [], exitK := none, hasPost := false,
-        loop? := none }
+        loop? := none, retInj? := none }
       if attach then
         let memTy ← mkAppM ``Membership.mem #[l', x]
         withLocalDeclD `hx memTy fun hx => do
@@ -292,6 +318,40 @@ partial def mapStx (c : Ctx) (e : Lean.Expr) (k : Ctx → Lean.Expr → TermElab
       else
         stmt c' (mkApp f x).headBeta
     `(WFLang.PCL.Expr.map $(← tyStx α) $(← tyStx β) $(← pexpr c l') (by decide) $body $rest)
+
+/-- `l.attach.foldl f init` (`List.foldl`, or `WFLang.listFoldl` for a `for x in l.attach` loop)
+in non-tail position, followed by the rest of the computation `k`:
+`Expr.foldl s u l init (⟦f acc x⟧) (k v)`.  The list and the initial value are evaluated first
+(they may contain calls); the body `f acc ⟨x, hx⟩` is a statement over two more variables `x`
+and `acc`, which may make calls (recursive calls included), with no join point in scope.  As for
+`map`, **proofs are erased**: the program folds over `l` itself, and the membership `hx : x ∈ l`
+is part of the path condition of the body, where the decrease proofs find it. -/
+partial def foldlStx (c : Ctx) (e : Lean.Expr) (k : Ctx → Lean.Expr → TermElabM Stx) :
+    TermElabM Stx := do
+  let args := e.getAppArgs
+  -- (accumulator type, function taking the accumulator first, initial value, `l.attach`)
+  let (accTy, f, init, la) ← if e.isAppOf ``List.foldl then
+      pure (args[0]!, args[2]!, args[3]!, args[4]!)
+    else do
+      -- `WFLang.listFoldl {α β} (f : β → α → β) (b : β) (l : List α)`
+      pure (args[1]!, args[2]!, args[3]!, args[4]!)
+  let la := (← instantiateMVars la).consumeMData
+  let (α, l0) := (la.getArg! 0, la.getArg! 1)
+  lift c init fun c init' => lift c l0 fun c l' => do
+    let rest ← withLocalDeclD `v accTy fun v =>
+      k { c with vars := v.fvarId! :: c.vars } v
+    let body ← withLocalDeclD `x α fun x => withLocalDeclD `acc accTy fun acc => do
+      let c' : Ctx := { c with
+        vars := acc.fvarId! :: x.fvarId! :: c.vars, joins := [], exitK := none, hasPost := false,
+        loop? := none, retInj? := none }
+      let memTy ← mkAppM ``Membership.mem #[l', x]
+      withLocalDeclD `hx memTy fun hx => do
+        let arg ← mkAppOptM ``Subtype.mk #[α, some (← mkLambdaFVars #[x]
+          (← mkAppM ``Membership.mem #[l', x])), x, hx]
+        let b ← eraseSubtypeArg hx (mkApp2 f acc arg).headBeta
+        stmt c' b
+    `(WFLang.PCL.Expr.foldl $(← tyStx α) $(← tyStx accTy) $(← pexpr c l') (by decide)
+        $(← pexpr c init') (by decide) $body $rest)
 
 partial def liftMany (c : Ctx) (es : List Lean.Expr) (acc : List Lean.Expr)
     (k : Ctx → List Lean.Expr → TermElabM Stx) : TermElabM Stx :=
@@ -306,7 +366,11 @@ partial def tailStx (c : Ctx) (e : Lean.Expr) : TermElabM Stx := do
   | some (dK, vK) =>
     `(WFLang.PCL.Expr.jump $(← jvarAt c dK vK) $(← pexpr c e) (by decide) (fun _ _ => trivial)
         (fun _ _ _ h => h))
-  | none => `(WFLang.PCL.Expr.ret $(← pexpr c e) (by decide) $(← postStx c))
+  | none =>
+    let e ← match c.retInj?, c.groupLay? with
+      | some i, some lay => lay.inj i e
+      | _, _ => pure e
+    `(WFLang.PCL.Expr.ret $(← pexpr c e) (by decide) $(← postStx c))
 
 /-- In the body of a loop capturing `li.ref`: the tail call `e` of `li.ref` is a back edge
 `jump L args`, with the proof that `args` goes down along the relation of the loop. -/

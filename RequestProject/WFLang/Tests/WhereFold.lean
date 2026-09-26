@@ -225,7 +225,7 @@ theorem allKnownOff_agree : ∀ a, Term.eval allKnownOff_term a = allKnown a := 
   Term.eval countDown_term a == countDown a && Term.eval useAddSum_term a == useAddSum a &&
   Term.eval allKnownOff_term a == allKnown a
 
-/-- info: 'ExWhereFold.allKnown_agree' depends on axioms: [propext, Quot.sound] -/
+/-- info: 'ExWhereFold.allKnown_agree' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms allKnown_agree
 

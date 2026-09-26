@@ -3,7 +3,8 @@ import Mathlib.Order.RelClasses
 /-!
 # Core of `PCL`: types, environments, variables, operators
 
-* object types `Ty` (`nat`, `bool`, `int`, pairs `prod s t`, lists `list t`) and their
+* object types `Ty` (`nat`, `bool`, `int`, pairs `prod s t`, lists `list t`, options
+  `option t`, sums `sum s t`, `except e t`, `string`, `char`, arrays `array t`) and their
   denotation,
 * environments `Env Γ` (right-nested tuples) and typed de Bruijn variables `Var Γ t`,
 * signatures `Sig` of recursive functions, curried function types `FnType` and
@@ -23,6 +24,18 @@ inductive Ty where
   | int
   | prod (s t : Ty)
   | list (t : Ty)
+  /-- `Option t` -/
+  | option (t : Ty)
+  /-- `s ⊕ t` -/
+  | sum (s t : Ty)
+  /-- `Except e t` -/
+  | except (e t : Ty)
+  | string
+  | char
+  /-- `Array t` -/
+  | array (t : Ty)
+  /-- `Unit` -/
+  | unit
   deriving DecidableEq, Repr, Hashable, Ord, Inhabited
 
 /-- Denotation of object types. -/
@@ -32,6 +45,29 @@ inductive Ty where
   | .int => Int
   | .prod s t => s.denote × t.denote
   | .list t => List t.denote
+  | .option t => Option t.denote
+  | .sum s t => s.denote ⊕ t.denote
+  | .except e t => Except e.denote t.denote
+  | .string => String
+  | .char => Char
+  | .array t => Array t.denote
+  | .unit => Unit
+
+/-- Decidable equality of `Except` (not provided by the core library). -/
+@[instance_reducible] def exceptDecEq {ε α : Type} [DecidableEq ε] [DecidableEq α] : DecidableEq (Except ε α)
+  | .error a, .error b =>
+    if h : a = b then isTrue (h ▸ rfl) else isFalse fun hh => h (Except.error.inj hh)
+  | .ok a, .ok b => if h : a = b then isTrue (h ▸ rfl) else isFalse fun hh => h (Except.ok.inj hh)
+  | .error _, .ok _ => isFalse nofun
+  | .ok _, .error _ => isFalse nofun
+
+/-- `Hashable` of sums (not provided by the core library). -/
+@[instance_reducible] def sumHashable {α β : Type} [Hashable α] [Hashable β] : Hashable (α ⊕ β) :=
+  ⟨fun | .inl a => mixHash 11 (hash a) | .inr b => mixHash 13 (hash b)⟩
+
+/-- `Hashable` of `Except` (not provided by the core library). -/
+@[instance_reducible] def exceptHashable {ε α : Type} [Hashable ε] [Hashable α] : Hashable (Except ε α) :=
+  ⟨fun | .error a => mixHash 17 (hash a) | .ok b => mixHash 19 (hash b)⟩
 
 /-- Decidable equality of the denotations. -/
 instance Ty.decEq : (t : Ty) → DecidableEq t.denote
@@ -40,6 +76,14 @@ instance Ty.decEq : (t : Ty) → DecidableEq t.denote
   | .int => inferInstanceAs (DecidableEq Int)
   | .prod s t => @instDecidableEqProd _ _ (Ty.decEq s) (Ty.decEq t)
   | .list t => @instDecidableEqList _ (Ty.decEq t)
+  | .option t => letI := Ty.decEq t; inferInstanceAs (DecidableEq (Option t.denote))
+  | .sum s t =>
+    letI := Ty.decEq s; letI := Ty.decEq t; inferInstanceAs (DecidableEq (s.denote ⊕ t.denote))
+  | .except e t => @exceptDecEq _ _ (Ty.decEq e) (Ty.decEq t)
+  | .string => inferInstanceAs (DecidableEq String)
+  | .char => inferInstanceAs (DecidableEq Char)
+  | .array t => letI := Ty.decEq t; inferInstanceAs (DecidableEq (Array t.denote))
+  | .unit => inferInstanceAs (DecidableEq Unit)
 
 /-- `Repr` of the denotations (used by the derived `Repr` of expressions with literals). -/
 instance Ty.instRepr : (t : Ty) → Repr t.denote
@@ -49,6 +93,15 @@ instance Ty.instRepr : (t : Ty) → Repr t.denote
   | .prod s t =>
     letI := Ty.instRepr s; letI := Ty.instRepr t; inferInstanceAs (Repr (s.denote × t.denote))
   | .list t => letI := Ty.instRepr t; inferInstanceAs (Repr (List t.denote))
+  | .option t => letI := Ty.instRepr t; inferInstanceAs (Repr (Option t.denote))
+  | .sum s t =>
+    letI := Ty.instRepr s; letI := Ty.instRepr t; inferInstanceAs (Repr (s.denote ⊕ t.denote))
+  | .except e t =>
+    letI := Ty.instRepr e; letI := Ty.instRepr t; inferInstanceAs (Repr (Except e.denote t.denote))
+  | .string => inferInstanceAs (Repr String)
+  | .char => inferInstanceAs (Repr Char)
+  | .array t => letI := Ty.instRepr t; inferInstanceAs (Repr (Array t.denote))
+  | .unit => inferInstanceAs (Repr Unit)
 
 /-- `Hashable` of the denotations (used by the derived `Hashable` of expressions). -/
 instance Ty.instHashable : (t : Ty) → Hashable t.denote
@@ -59,6 +112,13 @@ instance Ty.instHashable : (t : Ty) → Hashable t.denote
     letI := Ty.instHashable s; letI := Ty.instHashable t
     inferInstanceAs (Hashable (s.denote × t.denote))
   | .list t => letI := Ty.instHashable t; inferInstanceAs (Hashable (List t.denote))
+  | .option t => letI := Ty.instHashable t; inferInstanceAs (Hashable (Option t.denote))
+  | .sum s t => @sumHashable _ _ (Ty.instHashable s) (Ty.instHashable t)
+  | .except e t => @exceptHashable _ _ (Ty.instHashable e) (Ty.instHashable t)
+  | .string => inferInstanceAs (Hashable String)
+  | .char => inferInstanceAs (Hashable Char)
+  | .array t => letI := Ty.instHashable t; inferInstanceAs (Hashable (Array t.denote))
+  | .unit => inferInstanceAs (Hashable Unit)
 
 /-- `bool_eq` at every object type. -/
 def Ty.beq : (t : Ty) → t.denote → t.denote → Bool
@@ -67,6 +127,13 @@ def Ty.beq : (t : Ty) → t.denote → t.denote → Bool
   | .int, a, b => @BEq.beq Int _ a b
   | .prod s t, a, b => s.beq a.1 b.1 && t.beq a.2 b.2
   | .list t, a, b => @decide (a = b) (Ty.decEq (.list t) a b)
+  | .option t, a, b => @decide (a = b) (Ty.decEq (.option t) a b)
+  | .sum s t, a, b => @decide (a = b) (Ty.decEq (.sum s t) a b)
+  | .except e t, a, b => @decide (a = b) (Ty.decEq (.except e t) a b)
+  | .string, a, b => @decide (a = b) (Ty.decEq .string a b)
+  | .char, a, b => @decide (a = b) (Ty.decEq .char a b)
+  | .array t, a, b => @decide (a = b) (Ty.decEq (.array t) a b)
+  | .unit, a, b => @decide (a = b) (Ty.decEq .unit a b)
 
 /-- A default value of every type (the value of `head []`). -/
 def Ty.default : (t : Ty) → t.denote
@@ -75,6 +142,13 @@ def Ty.default : (t : Ty) → t.denote
   | .int => (0 : Int)
   | .prod s t => (s.default, t.default)
   | .list _ => ([] : List _)
+  | .option _ => (none : Option _)
+  | .sum s _ => (Sum.inl s.default : _ ⊕ _)
+  | .except e _ => (Except.error e.default : Except _ _)
+  | .string => ("" : String)
+  | .char => (Inhabited.default : Char)
+  | .array _ => (#[] : Array _)
+  | .unit => ()
 
 /-- Environments: right-nested tuples `(v₁, (v₂, … , ()))`. -/
 @[reducible] def Env : List Ty → Type
@@ -171,6 +245,22 @@ inductive BinOp : Ty → Ty → Ty → Type where
   | cons (t : Ty) : BinOp t (.list t) (.list t)
   /-- `l₁ ++ l₂` -/
   | append (t : Ty) : BinOp (.list t) (.list t) (.list t)
+  /-- `l[i]?` -/
+  | getElem? (t : Ty) : BinOp (.list t) .nat (.option t)
+  /-- `l.take n` -/
+  | take (t : Ty) : BinOp (.list t) .nat (.list t)
+  /-- `l.drop n` -/
+  | drop (t : Ty) : BinOp (.list t) .nat (.list t)
+  /-- `o.getD d` -/
+  | optGetD (t : Ty) : BinOp (.option t) t t
+  /-- `s ++ s'` on strings -/
+  | strAppend : BinOp .string .string .string
+  /-- `s.push c` -/
+  | strPush : BinOp .string .char .string
+  /-- `a.push x` on arrays -/
+  | arrPush (t : Ty) : BinOp (.array t) t (.array t)
+  /-- `a[i]?` on arrays -/
+  | arrGetElem? (t : Ty) : BinOp (.array t) .nat (.option t)
   deriving DecidableEq, Repr, Hashable
 
 /-- Meaning of the primitive operators. -/
@@ -204,6 +294,34 @@ def BinOp.eval : {a b c : Ty} → BinOp a b c → a.denote → b.denote → c.de
   | _, _, _, .pair _ _, x, y => (x, y)
   | _, _, _, .cons _, x, y => x :: y
   | _, _, _, .append _, x, y => x ++ y
+  | _, _, _, .getElem? _, x, y => x[y]?
+  | _, _, _, .take _, x, y => x.take y
+  | _, _, _, .drop _, x, y => x.drop y
+  | _, _, _, .optGetD _, x, y => x.getD y
+  | _, _, _, .strAppend, x, y => @HAppend.hAppend String String String _ x y
+  | _, _, _, .strPush, x, y => String.push x y
+  | _, _, _, .arrPush _, x, y => Array.push x y
+  | _, _, _, .arrGetElem? _, x, y => x[y]?
+
+/-- The value of an `inl`, `d` for an `inr`. -/
+def sumGetLeftD {α β : Type} (d : α) : α ⊕ β → α
+  | .inl a => a
+  | .inr _ => d
+
+/-- The value of an `inr`, `d` for an `inl`. -/
+def sumGetRightD {α β : Type} (d : β) : α ⊕ β → β
+  | .inl _ => d
+  | .inr b => b
+
+/-- The value of an `ok`, `d` for an `error`. -/
+def exceptGetOkD {ε α : Type} (d : α) : Except ε α → α
+  | .ok a => a
+  | .error _ => d
+
+/-- The value of an `error`, `d` for an `ok`. -/
+def exceptGetErrorD {ε α : Type} (d : ε) : Except ε α → ε
+  | .error e => e
+  | .ok _ => d
 
 /-- Primitive unary operators, typed (`!` is the separate constructor `PExpr.not`). -/
 inductive UnOp : Ty → Ty → Type where
@@ -227,6 +345,50 @@ inductive UnOp : Ty → Ty → Type where
   | range : UnOp .nat (.list .nat)
   /-- `List.sum` of a list of `Nat` -/
   | sum : UnOp (.list .nat) .nat
+  /-- `some x` -/
+  | some (t : Ty) : UnOp t (.option t)
+  /-- `o.isSome` -/
+  | isSome (t : Ty) : UnOp (.option t) .bool
+  /-- `o.getD default` (only used where `o` is known to be `some`) -/
+  | optGet (t : Ty) : UnOp (.option t) t
+  /-- `Sum.inl x` -/
+  | inl (s t : Ty) : UnOp s (.sum s t)
+  /-- `Sum.inr x` -/
+  | inr (s t : Ty) : UnOp t (.sum s t)
+  /-- `x.isLeft` -/
+  | isLeft (s t : Ty) : UnOp (.sum s t) .bool
+  /-- the value of an `inl` (`default` for an `inr`) -/
+  | getLeft (s t : Ty) : UnOp (.sum s t) s
+  /-- the value of an `inr` (`default` for an `inl`) -/
+  | getRight (s t : Ty) : UnOp (.sum s t) t
+  /-- `Except.ok x` -/
+  | ok (e t : Ty) : UnOp t (.except e t)
+  /-- `Except.error x` -/
+  | error (e t : Ty) : UnOp e (.except e t)
+  /-- `x.isOk` -/
+  | isOk (e t : Ty) : UnOp (.except e t) .bool
+  /-- the value of an `ok` (`default` for an `error`) -/
+  | getOk (e t : Ty) : UnOp (.except e t) t
+  /-- the value of an `error` (`default` for an `ok`) -/
+  | getError (e t : Ty) : UnOp (.except e t) e
+  /-- `String.length` -/
+  | strLength : UnOp .string .nat
+  /-- `String.toList` -/
+  | strToList : UnOp .string (.list .char)
+  /-- `String.ofList` -/
+  | strOfList : UnOp (.list .char) .string
+  /-- `Char.toNat` -/
+  | charToNat : UnOp .char .nat
+  /-- `Char.ofNat` -/
+  | charOfNat : UnOp .nat .char
+  /-- `Array.size` -/
+  | arrSize (t : Ty) : UnOp (.array t) .nat
+  /-- `Array.toList` -/
+  | arrToList (t : Ty) : UnOp (.array t) (.list t)
+  /-- `List.toArray` -/
+  | arrOfList (t : Ty) : UnOp (.list t) (.array t)
+  /-- `Array.range n = #[0, 1, …, n - 1]` -/
+  | arrRange : UnOp .nat (.array .nat)
   deriving DecidableEq, Repr, Hashable
 
 /-- Meaning of the unary operators. -/
@@ -244,6 +406,28 @@ def UnOp.eval : {a b : Ty} → UnOp a b → a.denote → b.denote
   | _, _, .length _, x => x.length
   | _, _, .range, x => List.range x
   | _, _, .sum, x => @List.sum Nat _ _ x
+  | _, _, .some _, x => Option.some x
+  | _, _, .isSome _, x => Option.isSome x
+  | _, _, .optGet t, x => Option.getD x t.default
+  | _, _, .inl _ _, x => Sum.inl x
+  | _, _, .inr _ _, x => Sum.inr x
+  | _, _, .isLeft _ _, x => Sum.isLeft x
+  | _, _, .getLeft s _, x => sumGetLeftD s.default x
+  | _, _, .getRight _ t, x => sumGetRightD t.default x
+  | _, _, .ok _ _, x => Except.ok x
+  | _, _, .error _ _, x => Except.error x
+  | _, _, .isOk _ _, x => Except.toBool x
+  | _, _, .getOk _ t, x => exceptGetOkD t.default x
+  | _, _, .getError e _, x => exceptGetErrorD e.default x
+  | _, _, .strLength, x => String.length x
+  | _, _, .strToList, x => String.toList x
+  | _, _, .strOfList, x => String.ofList x
+  | _, _, .charToNat, x => Char.toNat x
+  | _, _, .charOfNat, x => Char.ofNat x
+  | _, _, .arrSize _, x => Array.size x
+  | _, _, .arrToList _, x => Array.toList x
+  | _, _, .arrOfList _, x => List.toArray x
+  | _, _, .arrRange, x => Array.range x
 
 /-! ## Relations with fixed parameters -/
 

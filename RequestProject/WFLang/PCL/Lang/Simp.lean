@@ -67,6 +67,21 @@ in the evaluator only), then runs the rest on the result. -/
           (body.eval ge (x.1, e) ⟨g, x.2⟩ (Handler.push h) ()).1, e) g
         (Handler.push h) je).1 := rfl
 
+/-- A `foldl` node folds its body over the list (the membership proofs come from `List.attach`,
+in the evaluator only), then runs the rest on the result. -/
+@[simp] theorem eval_foldl {sf : Option (Self Γ)}
+    (s u : Ty) (l : PExpr Γ (.list s)) (hl : l.isNF = true) (init : PExpr Γ u)
+    (hi : init.isNF = true)
+    (body : Expr GL (u :: s :: Γ) (fun e => G e.2.2 ∧ e.2.1 ∈ l.eval e.2.2)
+      ((sf.map (·.push s)).map (·.push u)) u (fun _ _ => True) .nil)
+    (k : Expr GL (u :: Γ) (fun e => G e.2) (sf.map (·.push u)) t
+      (fun e v => Q e.2 v) (.wk js u))
+    (e : Env Γ) (g : G e) (h : Handler sf e) (je : JEnv js e) :
+    ((Expr.foldl s u l hl init hi body k).eval ge e g h je).1 =
+      (k.eval ge ((l.eval e).attach.foldl (fun acc x =>
+          (body.eval ge (acc, x.1, e) ⟨g, x.2⟩ (Handler.push (Handler.push h)) ()).1)
+          (init.eval e), e) g (Handler.push h) je).1 := rfl
+
 /-- A `join` node runs its scope, with the closure of its body as the value of the new join
 point. -/
 @[simp] theorem eval_join {sf : Option (Self Γ)}

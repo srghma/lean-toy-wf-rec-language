@@ -58,6 +58,7 @@ macro_rules
         | done
         | assumption
         | omega
+        | (apply Nat.mod_lt; omega)
         | ((simp only [WellFoundedRelation.rel, Prod.lex_def, InvImage, Nat.lt_wfRel,
               sizeOf_nat] at *) <;> omega)
         | solve_by_elim
@@ -77,6 +78,9 @@ macro_rules
               beq_iff_eq, ne_eq, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq,
               Bool.not_eq_true'] at *
            solve_by_elim)
+        -- an `if` in the goal (e.g. from `min`/`max`): split it, then `omega` in each branch
+        | (((try simp only [WFLang.Ty.denote, WFLang.PCL.tupleTy] at *); (repeat' split) <;>
+            first | omega | (simp_all <;> omega)); done)
         | decreasing_tactic)
 
 macro_rules
@@ -161,12 +165,13 @@ syntax (name := wfListCases) "wf_list_cases" : tactic
     try
       let gs ← casesList2 g d.fvarId
       for g' in gs do
-        let rest ← Tactic.run g' (Tactic.evalTactic (← `(tactic| simp_all)))
+        let rest ← Tactic.run g' (Tactic.evalTactic (← `(tactic|
+          first | (simp_all; done) | simp_all [Bool.or_assoc, Bool.and_assoc])))
         unless rest.isEmpty do throwError "not closed"
       Tactic.replaceMainGoal []
       return
     catch _ => restoreState saved
-  throwError "wf_list_cases: failed"
+  throwError "wf_list_cases: failed on the goal{indentD (← Meta.ppGoal g)}"
 
 /-- `wf_close` closes the goals left by an agreement proof after unfolding: split every `if`
 and `match`, then simplify or use `omega`. -/
@@ -182,6 +187,8 @@ macro_rules
         | (simp_all [Nat.sub_one_add_one] <;> congr <;> omega)
         | (simp_all [Nat.sub_one_add_one, Bool.beq_eq_decide_eq]; done)
         | (simp_all [Nat.sub_one_add_one, Bool.beq_eq_decide_eq] <;> omega)
+        | (simp_all [Nat.sub_one_add_one, decide_eq_false, decide_eq_true]; done)
+        | (simp_all [Nat.sub_one_add_one, Bool.or_assoc, Bool.and_assoc]; done)
         | wf_list_cases))
 
 end WFLang.Meta

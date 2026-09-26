@@ -138,6 +138,12 @@ structure Ctx where
   number of join points in scope outside `K` and the number of variables in scope at its
   definition. -/
   exitK : Option (Nat × Nat) := none
+  /-- Inside the body of the global function capturing a group of mutually recursive functions
+  (with different parameter or result types): its layout. -/
+  groupLay? : Option GroupLayout := none
+  /-- In the body of member `i` of such a group, when the members have different result types:
+  each value in tail position is returned as component `i` of the tuple of results. -/
+  retInj? : Option Nat := none
 
 /-- A `Ctx` over the parameters `xs` of the captured function (its object parameters: the
 proof parameters are not variables of the object language). -/
@@ -155,11 +161,18 @@ def Ctx.ofParams (fn : Name) (xs : Array Lean.Expr) (sig? : Option FnSig := none
 def objArgs (sig : FnSig) (args : Array Lean.Expr) : List Lean.Expr :=
   sig.objPos.map (args[·]!)
 
+/-- Is `e` a fold over `l.attach` (`List.foldl f init l.attach`, or `WFLang.listFoldl f init
+l.attach` from a `for x in l.attach` loop)?  It becomes a `foldl` statement, whose body knows
+`x ∈ l` (like `List.map`). -/
+def isAttachFoldl (e : Lean.Expr) : Bool :=
+  (e.isAppOfArity ``List.foldl 5 || e.isAppOfArity ``WFLang.listFoldl 5) &&
+    (e.getArg! 4).consumeMData.isAppOfArity ``List.attach 2
+
 /-- Does `e` call the function being captured, or one of the recursive callees, or contain a
 well-founded `while` loop or a `List.map` (which become statements, like a call)? -/
 def hasCall (c : Ctx) (e : Lean.Expr) : Bool :=
   (e.find? fun x => x.isAppOf c.fn || x.isAppOf ``WFLang.whileWF ||
-    x.isAppOfArity ``List.map 4 || c.callees.any (x.isAppOf ·.1) ||
+    x.isAppOfArity ``List.map 4 || isAttachFoldl x || c.callees.any (x.isAppOf ·.1) ||
     c.specFns.any (x.isAppOf ·) || c.group.any (x.isAppOf ·) || c.globals.any (x.isAppOf ·.1) ||
     c.ho.any (fun h => x.isAppOf h.fName || x.isAppOf h.gRef.name)).isSome
 

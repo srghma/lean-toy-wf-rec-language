@@ -12,13 +12,20 @@ namespace WFLang.Meta
 
 open Lean Meta Elab Term
 
+/-- The combinators of this project that are captured by specialisation (bounded loops and list
+combinators, `Core/Loops.lean`, `Core/ListLoops.lean`). -/
+def specCombinators : List Name :=
+  [``WFLang.rangeLoop, ``WFLang.listFoldl, ``WFLang.listFoldr, ``WFLang.listAny, ``WFLang.listAll,
+   ``WFLang.listFind?, ``WFLang.listFilter, ``WFLang.rangeLoopN, ``WFLang.listLoopN,
+   ``WFLang.listZipWith]
+
 /-- Is `c` a recursive function (other than `fn`) with specialised parameters (function, type
 or instance parameters), to be captured by specialisation at each call site? -/
 def isSpecFn (fn c : Name) : MetaM Bool := do
   if c == fn || isInternalName c || (← isMatcher c) then return false
   -- the library, and the definitions of this project (except the loop combinator)
   if (← isLibraryConst c) then return false
-  if (`WFLang).isPrefixOf c && c != ``WFLang.rangeLoop then return false
+  if (`WFLang).isPrefixOf c && !specCombinators.contains c then return false
   unless (← getConstInfo c).isDefinition do return false
   unless ← isWFRec c do return false
   forallTelescope (← inferType (← mkConstWithLevelParams c)) fun xs _ =>

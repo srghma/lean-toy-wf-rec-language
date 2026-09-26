@@ -106,9 +106,74 @@ def structRecArg? (fn : Name) : MetaM (Option Nat) := do
   let some info := Lean.Elab.Structural.eqnInfoExt.find? (← getEnv) fn | return none
   return some info.recArgPos
 
-/-- Is `fn` recursive, i.e. defined by well-founded or by structural recursion? -/
+/-- `set_option wfLang.pfixMeasure k` chooses the measure of the functions defined by
+`partial_fixpoint`: the `k`-th candidate of `pfixCandidates` (the value of a `Nat` parameter,
+the length of a `List` parameter, or the difference `a - b` of two `Nat` parameters), which must
+decrease at each recursive call.  `#lean_wf_func_to_term f` for such an `f` tries each candidate
+in turn (unless this option is set). -/
+register_option wfLang.pfixMeasure : Nat := {
+  defValue := 0
+  descr := "#lean_wf_func_to_term: the measure of a partial_fixpoint function (index among the candidate measures)"
+}
+
+/-- Is `fn` defined by `partial_fixpoint` (a single function, not a mutual group)? -/
+def isPFix (fn : Name) : MetaM Bool := do
+  let some info := Lean.Elab.PartialFixpoint.eqnInfoExt.find? (← getEnv) fn | return false
+  return info.declNames.size == 1
+
+/-- A candidate measure of a function defined by `partial_fixpoint`, in terms of the positions
+of its parameters. -/
+inductive PFixMeasure where
+  /-- the value of the `Nat` parameter `i` -/
+  | val (i : Nat)
+  /-- the length of the `List` parameter `i` -/
+  | len (i : Nat)
+  /-- `a - b` for the `Nat` parameters `a`, `b` (e.g. `n - i` for a counter `i` going up to `n`) -/
+  | diff (a b : Nat)
+  deriving Inhabited, BEq
+
+/-- The candidate measures of a `partial_fixpoint` definition `fn`, in the order they are tried:
+the values of its `Nat` parameters and the lengths of its `List` parameters, then the
+differences of two `Nat` parameters. -/
+def pfixCandidates (fn : Name) : MetaM (Array PFixMeasure) := do
+  forallTelescope (← inferType (← mkConstWithLevelParams fn)) fun xs _ => do
+    let mut out := #[]
+    let mut nats := #[]
+    for i in [0:xs.size] do
+      let t ← whnfR (← inferType xs[i]!)
+      if t.isConstOf ``Nat then
+        out := out.push (.val i)
+        nats := nats.push i
+      else if t.isAppOfArity ``List 1 then out := out.push (.len i)
+    for a in nats do
+      for b in nats do
+        if a != b then out := out.push (.diff a b)
+    return out
+
+/-- For a function defined by `partial_fixpoint`: the measure chosen for it
+(`wfLang.pfixMeasure`).  Lean gives no termination argument for such a function; the capture
+uses this one, and each recursive call must be proved to decrease it (as for the other
+functions, from the path condition).  The agreement theorem then states that the function is
+total and equal to the program. -/
+def pfixMeasure? (fn : Name) : MetaM (Option PFixMeasure) := do
+  unless ← isPFix fn do return none
+  let k := wfLang.pfixMeasure.get (← getOptions)
+  return (← pfixCandidates fn)[k]?
+
+/-- The parameter whose value (or length) decreases at each recursive call of `fn`: the
+argument of its structural recursion, or the parameter measuring a `partial_fixpoint`
+definition. -/
+def recArgOrMeasure? (fn : Name) : MetaM (Option Nat) := do
+  if let some i ← structRecArg? fn then return some i
+  match ← pfixMeasure? fn with
+  | some (.val i) | some (.len i) => return some i
+  | _ => return none
+
+/-- Is `fn` recursive, i.e. defined by well-founded or by structural recursion (or by
+`partial_fixpoint`, with a measure: `pfixMeasure?`)? -/
 def isWFRec (fn : Name) : MetaM Bool := do
   if (← structRecArg? fn).isSome then return true
+  if (← pfixMeasure? fn).isSome then return true
   -- (a member of a group of mutually recursive functions defined by well-founded recursion)
   if (Lean.Elab.WF.eqnInfoExt.find? (← getEnv) fn).isSome then return true
   forallTelescope (← inferType (← mkConstWithLevelParams fn)) fun xs _ => do

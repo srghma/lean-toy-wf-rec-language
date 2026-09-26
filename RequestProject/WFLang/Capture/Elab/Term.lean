@@ -240,6 +240,9 @@ partial def groupParts (group : Array Name) (reg : GReg) : TermElabM FixParts :=
   let (R, wf, lemmas) ← groupFixOf group
   let lemmas ← lemmas.mapM exprToSyntax
   let decTac ← `(tactic| wf_dec_tag [WFLang.PCL.Self.top, WFLang.PCL.Self.push])
+  let lay ← groupLayout group
+  if !lay.shared || !lay.sameRet then
+    return ← groupPartsPadded group reg lay sig R wf lemmas decTac
   let body ← withEqnRhs group[0]! fun xs _ => do
     withLocalDeclD `tag (Lean.mkConst ``Nat) fun t => do
       let rhss ← group.mapM fun g => do
@@ -268,6 +271,52 @@ partial def groupParts (group : Array Name) (reg : GReg) : TermElabM FixParts :=
   return { gam := ← exprToSyntax (mkTyList sig.argTys), ret := ← exprToSyntax sig.retTy,
            R := ← exprToSyntax R, wf := ← exprToSyntax wf, pre := ← `(fun _ => True),
            post := ← `(fun _ _ => True), body }
+/-- `groupParts` for a group whose members have different parameter or result types (layout
+`lay`): the parameters after the tag are those of all the members, one after the other, and the
+result is the tuple of the results of the members if they differ (`GroupLayout`). -/
+partial def groupPartsPadded (group : Array Name) (reg : GReg) (lay : GroupLayout) (sig : FnSig)
+    (R wf : Lean.Expr) (lemmas : Array Stx) (decTac : TSyntax `tactic) : TermElabM FixParts := do
+  -- the parameters of every member, in order
+  let rec openAll (i : Nat) (acc : Array (Array Lean.Expr)) : TermElabM Stx := do
+    if h : i < group.size then
+      forallTelescope (← inferType (← mkConstWithLevelParams group[i])) fun xs _ =>
+        openAll (i + 1) (acc.push xs)
+    else
+      withLocalDeclD `tag (Lean.mkConst ``Nat) fun t => do
+        let rhss ← (List.range group.size).toArray.mapM fun i => do
+          let g := group[i]!
+          let some eqn ← getUnfoldEqnFor? g (nonRec := true) |
+            throwError "#lean_wf_func_to_term: no unfolding equation for {g}"
+          let eq ← instantiateForall (← inferType (← mkConstWithLevelParams eqn))
+            (if lay.shared then acc[0]! else acc[i]!)
+          let some (_, _, rhs) := eq.eq? | throwError "unexpected equation shape"
+          return (← inlineCalls g (← normLoops (← Core.betaReduce rhs))).1
+        let mut callees := #[]
+        let mut specFns := #[]
+        for (g, rhs) in group.zip rhss do
+          for (h, hs, hk) in ← calleeKinds g rhs group do
+            unless callees.any (·.1 == h) do callees := callees.push (h, hs, hk)
+          for h in ← specFnsIn g rhs do
+            unless specFns.contains h do specFns := specFns.push h
+        let objs := if lay.shared then acc[0]!.toList else acc.toList.flatMap (·.toList)
+        let vars := (t :: objs).map (·.fvarId!)
+        let c0 : Ctx := { fn := group[0]!, vars := vars, fnSig? := some sig, globals := reg.names }
+        let c : Ctx := { c0 with group := group, lemmas := lemmas, decTac := some decTac }
+        let c : Ctx := { c with groupLay? := some lay }
+        let c : Ctx := { c with callees := callees, specFns := specFns }
+        let c : Ctx := { c with gref := registerGlobal reg, gcheckpoint := reg.checkpoint }
+        let ci (i : Nat) : Ctx := { c with retInj? := (if lay.sameRet then none else some i) }
+        let last := group.size - 1
+        let mut body ← stmt (ci last) rhss[last]!
+        for i in (List.range last).reverse do
+          let tst ← test c (.prop (← mkEq t (mkNatLit i)))
+          body ← `(WFLang.PCL.Expr.ite $tst (by decide) $(← stmt (ci i) rhss[i]!) $body)
+        return body
+  let body ← openAll 0 #[]
+  return { gam := ← exprToSyntax (mkTyList sig.argTys), ret := ← exprToSyntax sig.retTy,
+           R := ← exprToSyntax R, wf := ← exprToSyntax wf, pre := ← `(fun _ => True),
+           post := ← `(fun _ _ => True), body }
+
 end
 
 /-- The syntax of the global context `reg` (`Globals.defn … (Globals.defn Globals.nil …)`). -/
@@ -287,6 +336,16 @@ def callMainStx (fn : FnRef) (gi : GInfo) (tag : Option Nat) (reg : GReg) : Term
   withEqnRhs fn fun xs _ => do
     let c := { Ctx.ofParams fn.name xs sig with globals := reg.names }
     let tags := (if gi.tag0 then [mkNatLit 0] else []) ++ (tag.map mkNatLit).toList
+    -- a member of a group of mutually recursive functions with different signatures
+    if let (some i, some grp) := (tag, ← mutualGroup? fn.name) then
+      let lay ← groupLayout grp
+      if !lay.shared || !lay.sameRet then
+        let args ← pargsOpt c (tags.map some ++ lay.callArgs i (objArgs sig xs) ++
+          List.replicate gi.pad none)
+        return ← withLocalDeclD `r (← lay.retLeanTy) fun v => do
+          let c' := { c with vars := v.fvarId! :: c.vars }
+          `(WFLang.PCL.Expr.gCall $(gvarStx gi.pos) $args (by decide) $(← hpreStx c sig)
+              $(← retStx c' (← lay.proj i v)))
     let args ← pargsOpt c ((tags ++ objArgs sig xs).map some ++ List.replicate gi.pad none)
     let retTy ← inferType (mkAppN (← fn.const) xs)
     withLocalDeclD `r retTy fun v => do
@@ -385,9 +444,27 @@ def withAgreeOptions {m : Type → Type} [MonadWithOptions m] {α : Type} (x : m
 @[term_elab wfToTerm] def elabWfToTerm : TermElab := fun stx expectedType? =>
   withAgreeOptions do
     let fn ← whileTarget (← captureTarget stx[1])
-    let e ← elabTerm (← captureStx fn) expectedType?
-    -- (the proofs of the program are elaborated here, with the options above)
-    synthesizeSyntheticMVarsNoPostponing
-    instantiateMVars e
+    let run : TermElabM Lean.Expr := Term.withoutErrToSorry do
+      let hadErrors ← MonadLog.hasErrors
+      let e ← elabTerm (← captureStx fn) expectedType?
+      -- (the proofs of the program are elaborated here, with the options above)
+      synthesizeSyntheticMVarsNoPostponing
+      if !hadErrors && (← MonadLog.hasErrors) then
+        throwError "#lean_wf_func_to_term: the program built for {fn.name} does not elaborate"
+      instantiateMVars e
+    -- a function defined by `partial_fixpoint`: try each candidate measure in turn
+    if fn.isSpec || !(← isPFix fn.name) || (← getOptions).contains `wfLang.pfixMeasure then
+      return ← run
+    let saved ← saveState
+    let mut firstErr : Option Exception := none
+    for k in [0:(← pfixCandidates fn.name).size] do
+      try
+        return ← withOptions (wfLang.pfixMeasure.set · k) run
+      catch ex =>
+        if firstErr.isNone then firstErr := some ex
+        saved.restore
+    match firstErr with
+    | some ex => throw ex
+    | none => throwError "#lean_wf_func_to_term: {fn.name} is defined by partial_fixpoint and has no parameter of type Nat or List to use as a measure"
 
 end WFLang.Capture
