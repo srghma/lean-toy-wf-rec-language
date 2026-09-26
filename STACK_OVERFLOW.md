@@ -24,88 +24,66 @@ Ackermann(999, 1) before `main` starts. The PCL evaluator is never involved.
 `ack999_term` and `ack999_agree` still build. After this change, `wfbench native 1` finishes
 in about 1 ms.
 
-## 2. The evaluator uses one stack segment per recursive call, including tail calls
+## 2. Loops and tail calls: fixed by the jump machine
 
-**Which programs:** any run in which the chain of recursive calls gets too long. "Too long"
-means how many calls deep the recursion goes, not how many calls are made in total. **Tail
-calls count too.** These inputs are fine: `gcd` (logarithmic depth), `mc91Loop`, `isPow2`,
-`digitSum`, and small `ack` / `hyper`. These overflow: `sumTo i 0` for large `i`,
-`diagonal_tr m 0 0` (depth about m²/2), `diagonal`, and `ack` / `hyper` once their recursion
-gets deep. Native Lean compiles `sumTo`, `diagonal_tr` and `mc91Loop` to loops, so it has no
-such limit for them.
+**Before.** The evaluator `Expr.eval` (`PCL/Lang/Eval.lean`) used stack for every loop iteration
+and every recursive call, tail calls included:
 
-Measured on `diagonal_tr m 0 0`. These are single runs of the compiled `wfbench`, plus `#eval`
-under `lake env lean`; they are not a Lean proof:
+* a recursive call `fixSelfCall args dec k` is evaluated as `k.eval (h args …)`: the call is an
+  argument of the continuation, so it is never in tail position, even when `k` is just `ret v`;
+* a loop (`joinrec`) is run by `WellFounded.fix`, and each back edge `jump L x` calls the closure
+  of the loop body stored in the join-point environment, so each iteration nests a few more
+  frames.
 
-| setting | works | overflows |
+So `#eval` aborted the whole `lean` process with `deep recursion was detected at 'interpreter'`
+at about 2–3k nested calls or loop iterations (`sumTo 2500 0`, `diagonalWhile m n` for
+`n ≥ 40`–`60`), and compiled code (`wfbench`, 8 MB stack) overflowed on `diagonal_tr 3000 0 0`
+(4.5 M nested calls; an earlier run had overflowed at about 80k).  The test in
+`Tests/While.lean` was restricted to `n < 40` for this reason.
+
+**Now.** Compiled code (and `#eval`) runs a different evaluator, proved equal to `Expr.eval`:
+
+* `PCL/Lang/Machine.lean`: the **jump machine** `Expr.evalS`.  It keeps no join-point closures:
+  a statement returns a `Step`, which is a value, a pending jump `jmp i v` to a join point in
+  scope, or a pending tail call `call y` (the statement `let v := self y in ret v`, recognised
+  by `Expr.retHere?`).  `join` handles the jumps to its join point by running the body; `joinrec`
+  runs its loop with `runLoop`, a tail-recursive function that the compiler turns into a
+  `goto` loop.  Other jumps and tail calls are passed outwards.
+* `PCL/Lang/Fix.lean`: `fixS` runs a global function with the machine; a pending tail call is a
+  tail call of `fixS` itself, which is also compiled to a `goto` (checked in the generated C,
+  `.lake/build/ir/RequestProject/WFLang/PCL/Lang/Fix.c`).  Non-tail recursive calls go through
+  the handler closure as before.
+* `Expr.eval_val_eq_evalS` proves `(x.eval ge e g h je).1 = (x.evalS ge e g h).run h je` for
+  every statement, and `fixS` carries the proof that its value is the value of `fixFn`.  The
+  `@[csimp]` lemmas `Expr.eval_eq_evalImpl` and `fixFn_eq_fixFnImpl` then replace `Expr.eval`
+  and `fixFn` by the machine in compiled code.  No `@[implemented_by]` and no new axiom: the
+  replacement is checked by Lean, so the agreement theorems (`gcd_agree`, …) are about exactly
+  the code that runs.
+
+The stack depth is now the nesting depth of the syntax plus the depth of the **non-tail**
+recursive calls; loop iterations and tail calls use none.  Non-tail recursion (`ack`, `hyper`,
+`diagonal`) still uses one stack segment per nested call, which is inherent in those programs.
+
+Measured on this machine (single runs of the compiled `wfbench` and of `#eval` under
+`lake env lean`; timings, not proofs):
+
+| run | before | now |
 |---|---|---|
-| compiled, 8 MB stack (`ulimit -s 8192`) | m = 300 (≈45k nested calls) | m = 400 (≈80k) |
-| compiled, 64 MB stack | m = 800 (≈320k) | m = 1000 (≈500k) |
-| `#eval` (interpreter, default thread stack) | m = 60 (≈1.8k) | m = 80 (≈3.2k) |
-| `#eval` of `Term.eval sumTo_term n 0` | n = 2000 | n = 2500 |
-| same, with `lean --tstack=1000000` | n = 20000 | – |
-| native `Tco.diagonal_tr`, compiled | m = 3000 (4.5M calls, 5 ms) | – |
-| native `Tco.diagonal_tr`, `#eval` | m = 2000 (2M calls) | – |
+| `#eval` `diagonalWhile 0 n` (loop, `n(n+1)/2` iterations) | aborts for `n` ≈ 60 | `n = 1000` (500 500 iterations) in 3.0 s; `n = 3000` (4.5 M) works |
+| `#eval` `sumTo n 0` (tail calls) | aborts at `n = 2500` | `n = 100 000` in 0.24 s |
+| `#eval` `diagonal_tr 1000 0 0` (tail calls, 501 500) | aborts | 1.5 s (native Lean in the interpreter: 0.1 s) |
+| `wfbench pcl m` = `diagonal_tr m 0 0`, compiled, 8 MB stack | `m = 1000` in 408 ms; overflows at `m = 3000` | `m = 1000` in 90 ms; `m = 3000` (4.5 M calls) in 0.78 s; `m = 6000` (18 M) in 3.2 s (native: 18 ms) |
 
-That works out to about 100–130 bytes of C stack per recursive call in compiled code. In the
-interpreter it is far more: it fails at about 2–3k calls. There, the failure is an uncaught
-`deep recursion was detected at 'interpreter'` exception, and it aborts the whole `lean`
-process rather than reporting an error on the `#eval`. With a larger stack (`--tstack`) the
-same programs finish with the correct result. So this is a resource limit, not
-non-termination: the termination and soundness theorems are unaffected.
+The test suite now checks `diagonalWhile m n` for all `n < 60`, `m < 8`, and `diagonalWhile 0
+400` (80 200 iterations) in `Tests/While.lean`, and `sumTo 50000 0` and `diagonal_tr 300 0 0`
+in `Tests/BasicChecks.lean`.  `Tests/EvalChecks.lean` states these as theorems:
+`WhilePCL.diagonalWhile_term_eq` proves the `diagonalWhile` check for **all** `m n` (no sampling),
+and `native_decide` theorems record runs of the compiled machine (`diagonalWhile 0 1000`,
+`sumTo 100000 0`, `diagonal_tr 1000 0 0`).  Stack usage and timings themselves are not
+statements of Lean's logic and are not formalized.
 
-**Why.** Look at the case of `Expr.eval` (in `PCL/Lang.lean`) for a recursive call:
-
-```lean
-| .fixSelfCall args dec k, e, g, h => k.eval (h (args.eval e) (dec e g), e) g h
-```
-
-The recursive call `h (...)` is an *argument* of the continuation `k.eval`. Its result is
-needed before `k` can run, so it is never in tail position, even when the object program is
-tail-recursive. The capture writes `sumTo (i-1) (acc+i)` as
-`fixSelfCall args dec (ret (var here))`: "call, bind the result to `v`, return `v`". The
-evaluator does not see that the continuation just returns `v`. In the generated C
-(`.lake/build/ir/RequestProject/WFLang/PCL/Lang.c`), each object-level call is this chain of
-C calls:
-
-```
-Expr.eval (case fixSelfCall)
-  └─ lean_apply_2(h, args, _)                  -- h is a closure, a non-tail call
-       └─ fixC…lam_0 → WellFounded.fixC…        -- the compiled WellFounded.fix (csimp → fixC)
-            └─ Expr.eval body                   -- evaluates the body for the new arguments
-```
-
-Only then does it return and `goto` into `k`. The other cases (`ret`, `ite`, and the
-continuation of `fix`) already compile to `goto _start` loops and use no stack. So the stack
-depth of the evaluator equals the depth of the object program's call tree, counting tail
-calls. That explains the table above: `sumTo n` needs n nested frames, and
-`diagonal_tr m 0 0` needs about m²/2.
-
-`WellFounded.fix` itself is not the cause. The compiler replaces it by `WellFounded.fixC`,
-which is `F x (fun y _ => fixC hwf F y)`: a plain recursive function with no `Acc` or fuel.
-The cost comes from the evaluator having to return into `k` after every call.
-
-## What could remove the limit (not implemented)
-
-* **Larger stack** (no code change): `ulimit -s` for executables, `lean --tstack=…` for `#eval`.
-  This only moves the limit.
-* **Tail-call case in the evaluator:** when `k` is `ret (var here)`, evaluate the call as the
-  last action. That still does not give constant stack, because the recursive step goes through
-  the `h` closure and `fixC`, and the C compiler is not required to turn that into a jump.
-* **An evaluator with an explicit stack.** Run a small machine over `(expr, env, continuation
-  stack)` as a loop, where tail calls push nothing. That gives constant C stack for tail calls
-  and heap-allocated frames for real nesting (`ack`). Termination would have to be proved with
-  a measure built from `R` and the continuation stack, and it would need a new proof that the
-  machine agrees with `Expr.eval`. That is a substantial change to `Lang.lean`.
-
-## Recursive join points (loops)
-
-Loops are recursive join points (`joinrec`, including every `wf_while` loop, which is a derived
-form). The evaluator runs a loop with `WellFounded.fix` on the loop parameter, and each back edge
-`jump L x` calls the closure of the loop body, so an iteration also uses stack: in the
-interpreter, a few frames per iteration (`Expr.eval`, `JVar.get`, `WellFounded.fixC` and its
-lambda). `Tests/While.lean` runs `diagonalWhile m n` only for `n < 40` (about 1 000 iterations)
-for this reason; with `n` up to 59 (about 2 200 iterations) the interpreter aborted with the
-`deep recursion` error when this was tried (a single run, not a proof). The syntax now marks
-tail recursion explicitly (`jump` to a `joinrec`), which is what an explicit-stack evaluator
-would need in order to run loops in constant stack.
+**What is left.** The machine is still an interpreter over the syntax: each iteration of
+`diagonalWhile` evaluates about 30 nodes of call-free expressions, so it is about 20 times
+slower than the native Lean function under `#eval`, and far slower than native compiled code.
+Making it faster would mean compiling programs (for example into Lean closures once, before
+running them), which is not done.

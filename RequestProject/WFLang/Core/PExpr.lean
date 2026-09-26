@@ -1,4 +1,5 @@
 import RequestProject.WFLang.Core.Types
+import RequestProject.WFLang.Core.EvalSimpAttr
 
 /-!
 # Call-free expressions
@@ -76,5 +77,7 @@ theorem PExprs.wk_eval {s : Ty} {Γ : List Ty} (v : s.denote) (env : Env Γ) :
   | [], () => rfl
   | _ :: ts, (v, env) => by
       simp only [PExprs.ids, PExprs.eval, PExpr.eval, Var.get, PExprs.wk_eval, ids_eval ts env]
+
+attribute [wflang_eval] PExpr.eval PExprs.eval Var.get BinOp.eval UnOp.eval Ty.beq Ty.default
 
 end WFLang

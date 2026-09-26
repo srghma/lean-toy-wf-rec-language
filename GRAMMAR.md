@@ -24,6 +24,7 @@ Expr   ::= ret NF                                     -- return
          | if Cond then Expr else Expr                -- case          (tail only)
          | let v := self NF* in Expr                  -- fixSelfCall   (carries `dec`)
          | let v := g NF* in Expr                     -- gCall         (global function)
+         | let v := map (fun x => Expr) NF in Expr    -- map           (the body knows x ∈ l)
          | join j (v : s) := Expr in Expr             -- join          (tail only)
          | joinrec j (x : s) [R, wf] := Expr in Expr  -- joinrec       (tail only; a loop)
          | jump j NF                                  -- jump          (tail; a back edge
@@ -70,7 +71,7 @@ type-check (`Tests/Normal.lean`).
 Every rewrite preserves `PExpr.eval`, and the agreement theorems (`wf_agree`) are proved about
 the simplified programs, so each capture is checked against the Lean function end to end.
 
-## `while` loops (`PCL/Lang.lean`, `Core/While.lean`)
+## `while` loops (`PCL/Lang/While.lean`, `Core/While.lean`)
 
 `Expr.whileLoop s init hi c hc R wf inv hinit p hp step k` is
 `let v := (while c do x := p from x := init) in k`. It is a derived form (a definition, not a
@@ -94,13 +95,14 @@ is proved from `joinFn_unique`.
 The test is a `PExpr` with `isLoopCond`: in normal form and not a literal. Unlike the test of an
 `if`, it may be a negation (`Expr.whileBody` swaps the branches itself).
 
-**Lean side.** Lean's `while` (in `do` notation) is built on `Loop.forIn`, a `partial def`. It
-has no termination proof and cannot be unfolded in proofs. `lean_while_to_wf f` (with one
-`termination_by`/`decreasing_by` per loop) builds a well-founded version `f.wf` of `f`, whose
-loops are tail-recursive well-founded functions `f.loop_i` on the mutable variables, and proves
-`f.eq_wf : LoopLaw → ∀ xs, f xs = f.wf xs`, where `LoopLaw` (`Core/LeanWhile.lean`) is the
-unfolding law of `Loop.forIn`; `#lean_wf_func_to_term f` captures `f.wf` (each `f.loop_i` becomes a
-recursive join point), and `wf_agree` uses a hypothesis `h : LoopLaw`. Another
+**Lean side.** Lean's `while` (in `do` notation) is built on `Loop.forIn`. Since Lean v4.34 it
+is defined in the logic and unfolds by `Lean.Loop.forIn_eq_of_monadTail`; it still has no
+termination proof to reuse. `lean_while_to_wf f` (with one `termination_by`/`decreasing_by` per
+loop) builds a well-founded version `f.wf` of `f`, whose loops are tail-recursive well-founded
+functions `f.loop_i` on the mutable variables, and proves `f.eq_wf : ∀ xs, f xs = f.wf xs` from
+`WFLang.loopLaw : LoopLaw` (`Core/LeanWhile.lean`, the unfolding law of `Loop.forIn`, proved);
+`#lean_wf_func_to_term f` captures `f.wf` (each `f.loop_i` becomes a recursive join point), and
+`wf_agree` proves agreement with `f` itself, with no hypothesis. Another
 well-founded replacement is `WFLang.whileWF R wf inv c body step init hinit` (`Core/While.lean`).
 There is also its measure form `whileMeasure μ c body dec init`, with the notation
 
@@ -113,7 +115,31 @@ relation, invariant and proofs (as functions of the environment), requires the t
 to be call-free (the initial state may call), and proves agreement by rewriting both sides to
 `loopVal c body init`, the first iterate of `body` on which `c` is false (`whileWF_eq_loopVal`).
 
-## Global context (`PCL/Lang.lean`, `Capture/Elab.lean`)
+## `map`, and why programs hold no proofs except for termination
+
+`let v := map (fun x => body) l in k` (`Expr.map s u l hl body k`) maps a statement `body`, over
+one more variable `x : s`, over the list `l`. The body may make calls, recursive calls of the
+enclosing function included. It has no join point in scope (`JScope.nil`: a jump cannot leave
+the body) and no postcondition. Its path condition is the current one plus `x ∈ l`, so the
+decrease proof of a recursive call inside the body may use the membership. The evaluator maps
+over `l.attach` to supply that fact (`eval_map`); the program itself contains no membership
+proof.
+
+The current capture follows this convention (a design choice, not a restriction: the grammar may
+carry other proofs through a program if a future extension needs to): **a program contains only
+the proofs that justify termination**: the decrease
+proofs `dec` of recursive calls and of back edges, the well-foundedness proofs `wf`, and the
+facts they use (path conditions, pre- and postconditions). The normal-form proofs `hp`/`hc`/`ha`
+are Boolean checks (`decide`) of the optimisation. Nothing else a Lean function computes with
+proofs appears in the program: the capture erases proof arguments and proof components, and
+turns the facts they carry into facts of the path condition. `List.attach` is the standard
+example: Lean code writes `l.attach.map (fun ⟨x, h⟩ => f x)` only to have `h : x ∈ l` for the
+termination proof of `f x`, and the capture produces `map (fun x => f x) l`, where `x ∈ l` is in
+the path condition. The agreement proofs relate the two forms with `List.attach_map_val`.
+`PTerm.maps` counts the `map` nodes; `Tests/Map.lean` has the examples, including
+`underLambda`.
+
+## Global context (`PCL/Lang/Program.lean`, `Capture/Elab/Term.lean`)
 
 A program is `PTerm.mk globals main`: a list of global functions (`Globals`, each a closed
 well-founded recursive function `defn gs f R wf body`, a non-recursive one using the empty relation `emptyRelation`)
@@ -151,7 +177,7 @@ global context.
 
 Calls with known arguments: a call `g a₁ … aₙ` of a user function whose arguments are all known
 (the call is a closed term) is evaluated when the function is captured and replaced by its
-value (`foldCall?` in `Capture/Meta.lean`; the kernel computes the value). This holds for
+value (`foldCall?` in `Capture/Meta/Calls.lean`; the kernel computes the value). This holds for
 global functions and `@[inlinable]` ones alike, recursive or not. The function is then not
 needed for that call, so a function only called with known arguments is neither in the global
 context nor a loop. `wf_agree` proves each equation `g a₁ … aₙ = v` with the same kernel
@@ -160,7 +186,7 @@ being captured itself, of functions with a subtype result, proof parameters or f
 parameters, and calls inside proofs. `set_option wfLang.foldCalls false` turns it off.
 See `Tests/WhereFold.lean`.
 
-## Recursive join points (`PCL/Lang.lean`, `Capture/Stmt.lean`)
+## Recursive join points (`PCL/Lang/Syntax.lean`, `Capture/Stmt.lean`)
 
 ```
 joinrec j (x : s) [R, wf] := body in m
@@ -198,7 +224,7 @@ value of the join points in scope. `Tests/Loops.lean` pins the shapes (`loops`, 
 two calls give two loops, a loop can contain a loop, a loop body can call a global function, and
 bounded `for` loops (through the tail-recursive `rangeLoop`) are loops too.
 
-## Join points (`PCL/Lang.lean`)
+## Join points (`PCL/Lang/Syntax.lean`)
 
 **The problem.** A non-tail `if` containing a call, such as `(if c then f a else f b) + rest`, had
 to become `if c then (let v := f a; rest v) else (let v := f b; rest v)`, because `ite` must stay

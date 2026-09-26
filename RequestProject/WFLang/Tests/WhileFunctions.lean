@@ -4,15 +4,14 @@ import Mathlib.Tactic.Linarith
 /-!
 # Lean functions written with well-founded `while` loops
 
-Lean's `while` (in `do` notation) is `partial`: the uploaded `while` functions
-(`Tco.diagonalWhile`, `Tco.mc91While`, `Tco.AckWithoutStackButUsingCantorPairing.isqrt`, …) have
-no termination proof and cannot be unfolded in proofs.  These are the same loops written with the
-well-founded loop of `Core/While.lean` (the notation `wf_while`, or `WFLang.whileWF` with an
+Lean's `while` (in `do` notation) carries no termination measure: the uploaded `while` functions
+(`Tco.diagonalWhile`, `Tco.mc91While`, `Tco.AckWithoutStackButUsingCantorPairing.isqrt`, …) state
+no measure.  These are the same loops written with the well-founded loop of `Core/While.lean` (the notation `wf_while`, or `WFLang.whileWF` with an
 invariant): each one states its termination measure, and is captured by
 `#lean_wf_func_to_term` as a `PCL` `while` statement (`Tests/While.lean`).
 
 The uploaded `while` functions themselves are captured too, through `lean_while_to_wf` and the
-unfolding law `LoopLaw` of Lean's `while` (`Tests/LeanWhile.lean`).
+unfolding law of Lean's `while`, `WFLang.loopLaw` (`Tests/LeanWhile.lean`).
 -/
 
 open WFLang

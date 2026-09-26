@@ -68,8 +68,8 @@ pinned test counts would change. None of them is a limitation of the language.
 4. **The capture uses `fns` only as "define it, then call it once".** Every local call the
    capture emits is `$head (Expr.fnCall FnVar.here …)`: a fresh `fix` node immediately
    followed by a call of the innermost local function (`Capture/Elab.lean`, the `calleeCall?`
-   and `specCall?` cases of the translation, `captureStx`; `Expr.ofFix` in `Lang.lean`).
-   `FnVar.there` is generated only for global indices (`gvarStx` in `Capture/Translate.lean`).
+   and `specCall?` cases of the translation, `captureStx`; `Expr.ofFix` in `PCL/Lang/`).
+   `FnVar.there` is generated only for global indices (`gvarStx` in `Capture/Translate/Context.lean`).
    So the de Bruijn structure of `fns` is never really used, and a callee called `k` times is
    **copied `k` times**. `Tests/Globals.lean` pins this: `useInlined` has 3 `fix` nodes for 3
    calls of `sumToI`, and size 19 against 11 for the version using globals. Nested

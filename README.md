@@ -20,13 +20,13 @@ def gcd_term : Term ⟨[.nat, .nat], .nat⟩ := #lean_wf_func_to_term gcd
 theorem gcd_agree : ∀ m n, Term.eval gcd_term m n = gcd m n := by wf_agree
 ```
 
-## The language (`RequestProject/WFLang/PCL/Lang.lean`)
+## The language (`RequestProject/WFLang/PCL/Lang/`)
 
 * Types `nat`, `int`, `bool`, pairs `prod s t` and lists `list t`; typed de Bruijn variables.
 * Call-free expressions (`PExpr`, `Core/PExpr.lean`): `+ - * / % ^`, shifts and bitwise
   operators, `Nat.gcd`/`Nat.lcm`/`Nat.log2`, `<`, `≤`, `bool_eq` (`==` at every type), `&&`,
   `||`, `!`, `xor`, pairing and projections, `[]`, `::`, `++`, `head`, `tail`, `isNil`,
-  `length`, casts between `Nat` and `Int`.
+  `length`, `List.range`, `List.sum` (on `Nat`), casts between `Nat` and `Int`.
 * Statements (`Expr`), in **strict A-normal form** and **optimised normal form**:
 
   ```
@@ -34,6 +34,7 @@ theorem gcd_agree : ∀ m n, Term.eval gcd_term m n = gcd m n := by wf_agree
   | ite c hc a b                           -- if-then-else, tail position only
   | fixSelfCall args ha dec hpre k         -- let v := self args in k   (recursive call)
   | gCall g args ha hpre k                 -- let v := g args in k      (global function g)
+  | map s u l hl body k                    -- let v := List.map (fun x => body) l in k
   | join s P body m                        -- join j (v : s) := body in m, tail position only
   | joinrec s P R wf body m                -- joinrec j (x : s) [R] := body in m  (a loop)
   | jump j p hp hpre hpost                 -- jump j p                  (tail position)
@@ -67,6 +68,19 @@ theorem gcd_agree : ∀ m n, Term.eval gcd_term m n = gcd m n := by wf_agree
   arguments are `R`-smaller. That proof may use the enclosing `if` tests, the precondition and
   the postconditions of earlier calls, which are recorded in the type of the statement (the path
   condition).
+* **`map`** (`Expr.map`): `let v := List.map (fun x => body) l in k`. The body is a statement
+  over one more variable `x`; it may make calls, recursive calls included, and its path condition
+  contains `x ∈ l`, which its decrease proofs may use. The evaluator supplies the membership
+  proofs itself (it maps over `l.attach`); the program contains none.
+* **No proofs in programs except for termination.** The only proofs a program contains are the
+  ones that justify termination (and the facts they rely on): the decrease proofs of recursive
+  calls and back edges, the path conditions, pre- and postconditions they use, and the
+  well-foundedness proofs. The `hp`/`hc`/`ha` normal-form proofs are Boolean checks of the
+  optimisation, closed by `decide`. The capture erases the proofs of the Lean function: proof
+  arguments and proof components become facts of the path condition. For example,
+  `l.attach.map (fun ⟨x, h⟩ => f x)` is captured as `map (fun x => f x) l`, with no `attach`
+  and no proof `h` (`Tests/Map.lean`). This is how the current capture works, not a rule of
+  the language: programs may carry other proofs where a future extension needs them.
 * **Recursive join points** (`joinrec`, loops): the body runs in the enclosing context (it
   reads the enclosing variables, stays inside the enclosing function, and may jump to the join
   points defined before it, e.g. to exit). Its relation `R : Env Γ → s → s → Prop` may depend
@@ -141,17 +155,16 @@ The capture supports:
   theorem isqrtNewton_agree : ∀ n, Term.eval isqrtNewton_term n = isqrtNewton n := by wf_agree
   ```
 * **Lean's own `while` in `do` notation** (`Capture/LeanWhile.lean`, `Tests/LeanWhile.lean`).
-  Lean builds it on `Lean.Loop.forIn`, a `partial def` that the logic cannot unfold, so the
-  command `lean_while_to_wf f termination_by μ₁ … termination_by μₖ` (one optional measure and
-  `decreasing_by` per loop, in source order; Lean guesses a measure when none is given) generates
-  a well-founded version: each loop becomes a tail-recursive well-founded function `f.loop_i` on
-  its mutable variables, `f.wf` is `f` with its loops replaced by them, and
-  `f.eq_wf : LoopLaw → ∀ xs, f xs = f.wf xs`. `LoopLaw` (`Core/LeanWhile.lean`) is the unfolding
-  equation of `while` (`forIn Loop.mk init body` runs `body` and continues or stops); it cannot be
-  proved inside Lean because `Loop.forIn` is opaque, so it is an explicit hypothesis of every
-  agreement theorem (`loopLaw_satisfiable` shows it is consistent: its intended solution exists).
+  Since Lean v4.34, `while` (`Lean.Loop.forIn`) is defined in the logic and has an unfolding
+  theorem. `WFLang.loopLaw : LoopLaw` (`Core/LeanWhile.lean`) is that law, proved from Lean's
+  `Lean.Loop.forIn_eq_of_monadTail`: `forIn Loop.mk init body` runs `body` once, then continues
+  or stops. The command `lean_while_to_wf f termination_by μ₁ … termination_by μₖ` (one optional
+  measure and `decreasing_by` per loop, in source order; Lean guesses a measure when none is
+  given) generates a well-founded version: each loop becomes a tail-recursive well-founded
+  function `f.loop_i` on its mutable variables, `f.wf` is `f` with its loops replaced by them, and
+  `f.eq_wf : ∀ xs, f xs = f.wf xs` is proved with `loopLaw`. There is no hypothesis left:
   `#lean_wf_func_to_term f` captures `f.wf` (running `lean_while_to_wf f` first if needed) and
-  `wf_agree` proves agreement from `h : LoopLaw`:
+  `wf_agree` proves agreement with `f` itself:
 
   ```lean
   def gcdW (a b : Nat) : Nat := Id.run do
@@ -166,21 +179,23 @@ The capture supports:
     termination_by b
     decreasing_by all_goals exact Nat.mod_lt _ (by simp_all; omega)
   def gcdW_term : Term ⟨[.nat, .nat], .nat⟩ := #lean_wf_func_to_term gcdW
-  theorem gcdW_agree (h : LoopLaw) : ∀ a b, Term.eval gcdW_term a b = gcdW a b := by wf_agree
+  theorem gcdW_agree : ∀ a b, Term.eval gcdW_term a b = gcdW a b := by wf_agree
   ```
 
   Supported: `break`, several loops in a row, nested loops, `match`/`if` in the body, loops
   reading earlier values, callers of functions with loops. The uploaded `isqrt` (and
   `unpairLeft`/`unpairRight`), `diagonalWhile` and `mc91While` are captured this way, and
-  `diagonalWhile_eq` (omitted before) is proved under `LoopLaw`. Not supported: `return` inside a
+  `diagonalWhile_eq` (omitted before) is proved. Not supported: `return` inside a
   loop, recursive functions containing a loop, and loops without a provable measure
   (`ackWhile`, `ackNoDataStructure`, whose stack needs a multiset order).
+* `List.map`, including `List.attach.map` with recursive calls in the body, e.g.
+  `((List.range n).attach.map fun ⟨i, _⟩ => underLambda i).sum` (`Tests/Map.lean`);
 * bounded `for` loops and `Nat.fold`, and function parameters specialised to the function
   passed at each call site, including recursion through a function argument
   (`Tco.hyperWhile`, `Tco.hyperTCO`, `Tco.ack2`).
 
-`GAPS.md` lists what is still rejected (e.g. calls under a `fun` in library code such as
-`List.map`, Lean `while` loops with an early `return` or without a provable measure, and calls
+`GAPS.md` lists what is still rejected (e.g. calls under a `fun` in library code other than
+`List.map`, such as `List.foldl`, Lean `while` loops with an early `return` or without a provable measure, and calls
 inside the body of a `wf_while`).
 `UNSUPPORTED.md` is the current assessment of everything still unsupported (types, library
 combinators, `do` features, termination arguments, evaluator limits); its rejections are pinned in
@@ -188,7 +203,7 @@ combinators, `do` features, termination arguments, evaluator limits); its reject
 
 ## Use of Mathlib
 
-The project depends on Mathlib (`lakefile.toml`, pinned to the `v4.28.0` tag, matching the
+The project depends on Mathlib (`lakefile.toml`, pinned to the `v4.34.0` tag, matching the
 Lean toolchain). It is used where it replaces hand-written material:
 
 * **Well-founded relations** (`Core/Types.lean`): `fibreRel_wf` (a relation that keeps some
@@ -260,27 +275,49 @@ RequestProject/WFLang/
 ├── Core/Loops.lean                 rangeLoop: first-order form of `for` loops and `Nat.fold`
 ├── Core/While.lean                 well-founded `while` in Lean: whileWF, whileMeasure, `wf_while`,
 │                                   loop equation, loopVal
-├── Core/LeanWhile.lean             LoopLaw: the unfolding law of Lean's `while` (Loop.forIn);
-│                                   its consequences and its satisfiability
+├── Core/LeanWhile.lean             LoopLaw: the unfolding law of Lean's `while` (Loop.forIn),
+│                                   proved (loopLaw), and its consequences
+├── Core/EvalSimpAttr.lean          the simp set `wflang_eval` (equations of the evaluator)
 ├── Core/PExpr.lean                 call-free expressions PExpr / PExprs
 ├── Core/PExprMap.lean              renaming (functor laws) and traversal (traversable laws) of
 │                                   PExpr / PExprs; Inhabited / IsEmpty instances
 ├── Core/Normal.lean                optimised normal form: PExpr.isNF, PExpr.isCond
-├── PCL/Lang.lean                   Expr (ret, ite, fixSelfCall, gCall, join, joinrec, jump),
-│                                   eval, Globals, PTerm/Term, soundness, whileLoop (derived)
-├── PCL/Size.lean                   size measures (nodes, joins, loops, global calls, globals)
+├── PCL/Lang.lean                   the language (imports PCL/Lang/*):
+│   ├── Lang/Syntax.lean            global functions, join points, Expr (ret, ite, fixSelfCall,
+│   │                               gCall, map, join, joinrec, jump)
+│   ├── Lang/Eval.lean              eval (reference semantics), soundness of loops (joinFn)
+│   ├── Lang/Machine.lean           the jump machine evalS (loops, tail calls in constant stack),
+│   │                               its proof of agreement with eval, csimp
+│   ├── Lang/Fix.lean               global functions (fixFn), soundness, fixS (machine), csimp
+│   ├── Lang/While.lean             whileLoop (derived form) and eval_whileLoop
+│   ├── Lang/Program.lean           Globals, PTerm/Term, Term.ofFix, tuples
+│   └── Lang/Simp.lean              simp lemmas used by the capture tactics
+├── PCL/Size.lean                   size measures (nodes, joins, loops, global calls, maps, globals)
 ├── PCL/Termination.lean            base-case existence, unbuildable loops
-├── Capture/Meta.lean               reading a Lean function; @[inlinable]; inlining, globals;
-│                                   tactics wf_dec, wf_close
+├── Capture/Meta.lean               reading a Lean function (imports Capture/Meta/*):
+│   ├── Meta/Signature.lean         object types, signatures, specialised references (FnRef)
+│   ├── Meta/Fix.lean               the WellFounded.fix of a Lean function
+│   ├── Meta/Calls.lean             @[inlinable], calls with known arguments, inlining, loops
+│   ├── Meta/Callees.lean           classifying callees, global functions, withEqnRhs
+│   ├── Meta/WFRel.lean             decrease proofs, well-founded relations on environments
+│   ├── Meta/Mutual.lean            mutual recursion, recursion through a function argument
+│   ├── Meta/Tactics.lean           tactics wf_dec, wf_close, …
+│   └── Meta/Agree.lean             skeleton of the agreement tactic
 ├── Capture/Optimize.lean           simplifying IR (constant folding, identities, dead branches)
-├── Capture/Translate.lean          Lean term → PExpr syntax, branch recognition, the capture
-│                                   context (callees: loops or globals)
+├── Capture/Translate/Context.lean  the capture context (callees: loops or globals)
+├── Capture/Translate.lean          Lean term → PExpr syntax, branch recognition
+├── Capture/Stmt/Basic.lean         helpers: control-flow tests, callee kinds, join-point
+│                                   indices, loop-state tuples
 ├── Capture/Stmt.lean               Lean term → statements: A-normal form, join points, loops
-│                                   for tail-recursive inlinable callees, global calls, `while`
+│                                   for tail-recursive inlinable callees, global calls, `while`,
+│                                   `List.map` (with `List.attach` and its proofs erased)
+├── Capture/LeanWhile/Loops.lean    recognising Lean's `while` loops, tuples of mutable
+│                                   variables, the loop as a tail-recursive function
 ├── Capture/LeanWhile.lean          `lean_while_to_wf f`: well-founded versions f.loop_i, f.wf of
-│                                   a function using Lean's `while`, and f.eq_wf (under LoopLaw)
-├── Capture/Elab.lean               the lazily collected global context, #lean_wf_func_to_term,
-│                                   wf_agree
+│                                   a function using Lean's `while`, and f.eq_wf
+├── Capture/Elab.lean               the capture commands (imports Capture/Elab/*):
+│   ├── Elab/Term.lean              the lazily collected global context, #lean_wf_func_to_term
+│   └── Elab/Agree.lean             the agreement tactic wf_agree
 └── Tests/                          the PCL test suite
     ├── Functions.lean              gcd, digitSum, isPow2, sumTo; namespace Tco (all functions
     │                               of the uploaded Tco*.lean files, verbatim)
@@ -308,9 +345,11 @@ RequestProject/WFLang/
     │                               runtime checks, rejections
     ├── Loops.lean                  tail-recursive @[inlinable] functions inlined as loops
     │                               (recursive join points) inside the caller
-    └── LeanWhile.lean              Lean's own `while`: the uploaded loops and others captured,
-                                    agreement under LoopLaw, diagonalWhile_eq, runtime checks,
-                                    rejections
+    ├── LeanWhile.lean              Lean's own `while`: the uploaded loops and others captured,
+    │                               agreement theorems, diagonalWhile_eq, runtime checks,
+    │                               rejections
+    └── Map.lean                    `List.map` and `List.attach.map` (proofs erased), with
+                                    recursive calls in the body; underLambda
 GAPS.md                             what is supported, how, and what is left
 GRAMMAR.md                          grammar layers: why join points, why no Atom layer
 CONTEXTS_ASSESSMENT.md              the design note behind removing local functions and adding

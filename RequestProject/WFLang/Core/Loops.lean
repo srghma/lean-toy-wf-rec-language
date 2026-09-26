@@ -24,7 +24,7 @@ theorem foldl_range'_eq_rangeLoop {β : Type} (g : β → Nat → β) (i n : Nat
   induction n generalizing i b with
   | zero => rw [rangeLoop]; simp
   | succ n ih =>
-    rw [rangeLoop, if_pos (by omega), List.range'_succ, List.foldl_cons, ih]
+    rw [rangeLoop, ite_eq_left (by omega), List.range'_succ, List.foldl_cons, ih]
     congr 1; omega
 
 /-- A loop body whose branches all continue: one `ForInStep.yield` of an `if`. -/
@@ -37,7 +37,7 @@ theorem rangeLoop_add_sub {β : Type} (f : Nat → β → β) (a b : Nat) (x : �
     rangeLoop f (a + (b - a)) a x = rangeLoop f b a x := by
   by_cases h : a ≤ b
   · rw [Nat.add_sub_cancel' h]
-  · rw [rangeLoop, if_neg (by omega), rangeLoop, if_neg (by omega)]
+  · rw [rangeLoop, ite_eq_right (by omega), rangeLoop, ite_eq_right (by omega)]
 
 theorem fold_eq_rangeLoop {β : Type} (f : Nat → β → β) (n : Nat) (b : β) :
     Nat.fold n (fun i _ acc => f i acc) b = rangeLoop f n 0 b := by

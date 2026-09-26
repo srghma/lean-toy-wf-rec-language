@@ -60,13 +60,15 @@ What would lift it: sum and option types in `Ty`, with a `case` statement, would
 
 The capture reads the definitions of user functions. Library functions are translated only if they
 map to one of the `PCL` operators (`+ - * / %`, `^`, shifts, bitwise, `gcd`, `lcm`, `log2`, `Int`
-arithmetic and comparisons, pairs, `::`, `++`, `head`, `tail`, `isNil`, `length`, and a few
-rewrites: `min`, `max`, `∣`, `pred`, `!=`). Any other library call is `unsupported expression`.
+arithmetic and comparisons, pairs, `::`, `++`, `head`, `tail`, `isNil`, `length`, `List.range`,
+`List.sum` on `Nat`, and a few rewrites: `min`, `max`, `∣`, `pred`, `!=`), and `List.map`, which is
+a statement of the grammar (`Expr.map`; also `List.attach.map`, whose proofs are erased: see
+`Tests/Map.lean`). Any other library call is `unsupported expression`.
 
 | not supported | example | evidence |
 |---|---|---|
-| `List.map`, `List.foldl`, `List.contains`, `List.getD`, `l[i]!`, … | `mapSq`, `listFoldl`, `listHas3`, `listGetD`, `listIdx` | [pinned] |
-| a recursive call under a `fun` given to a library combinator | `underLambda`: `(List.range n).attach.map fun ⟨i, _⟩ => underLambda i` | [pinned] (`Tests/Gaps.lean`) |
+| `List.foldl`, `List.contains`, `List.getD`, `l[i]!`, … | `listFoldl`, `listHas3`, `listGetD`, `listIdx` | [pinned] |
+| a recursive call under a `fun` given to a library combinator other than `List.map` | a call inside the function given to `List.foldl` | [documented] |
 | `decide` on a proposition with a bounded quantifier | `decide (∀ i < n, i * i ≠ 7)` → `unsupported condition` | [pinned] |
 | `for x in l` over a **list** | `forList` | [pinned] |
 | `break` in a `for` loop | `forBreak` | [pinned] |
@@ -83,7 +85,7 @@ specialised function per captured function; `f` and the higher-order `g` must ha
 type; no proof parameters or subtype results; the calls of `f` inside the function argument may not
 be under another binder.
 
-What would lift it: first-order replacements for the common combinators (`map`, `foldl`, `any`/`all`,
+What would lift it: first-order replacements for the other common combinators (`foldl`, `any`/`all`,
 `for x in l`, loops with early exit), like `rangeLoop` for `for` over a range, whose function
 argument receives the membership proof (`i ∈ l`) that termination proofs use.
 
@@ -101,16 +103,17 @@ argument receives the membership proof (`i ∈ l`) that termination proofs use.
 
 Details:
 
-* **Lean's own `while`.** Supported through `lean_while_to_wf` (`Capture/LeanWhile.lean`) under
-  the hypothesis `LoopLaw` (the unfolding law of `Lean.Loop.forIn`, which Lean cannot prove since
-  `Loop.forIn` is a `partial def`); `isqrt`, `diagonalWhile` and `mc91While` are captured this way
+* **Lean's own `while`.** Supported through `lean_while_to_wf` (`Capture/LeanWhile.lean`), with
+  agreement proved by `WFLang.loopLaw` (the unfolding law of `Lean.Loop.forIn`, a theorem since
+  Lean v4.34); `isqrt`, `diagonalWhile` and `mc91While` are captured this way
   in `Tests/LeanWhile.lean`. Not supported: `return` inside a loop (the loop state would carry an
   early-exit value), recursive functions containing a loop, and loops without a measure.
 * **Non-well-founded definitions.** Lean builds `partial` and `partial_fixpoint` without
   a termination proof that can be reused, so there is nothing to translate. The workaround is to
   rewrite the loop with `wf_while … termination_by μ` or `WFLang.whileWF` (`Core/While.lean`), as
-  `Tests/WhileFunctions.lean` does for `diagonalWhile`, `mc91While` and Newton's `isqrt`. Those
-  rewrites match the originals only on sample inputs, not by proof: the originals are opaque.
+  `Tests/WhileFunctions.lean` does for `diagonalWhile`, `mc91While` and Newton's `isqrt` (the
+  versions of these functions written with Lean's own `while` are captured directly, with proofs,
+  in `Tests/LeanWhile.lean`).
   `ackWhile` / `ackNoDataStructure` would need a measure on the stack (a multiset order) and have
   not been rewritten.
 * **What a decrease proof may use.** Inside a program, a decrease proof sees only the path
@@ -131,24 +134,15 @@ Details:
 
 ## 5. The evaluator at runtime
 
-* **Stack depth** ([documented], `STACK_OVERFLOW.md`). `Expr.eval` uses one native stack frame per
-  object-level recursive call, **tail calls included**, because the result of a recursive call is
-  an argument of the continuation. Measured on single runs (not proofs):
-  * compiled code with an 8 MB stack overflows at around 80k nested calls;
-  * `#eval` in the interpreter aborts the whole `lean` process at around 2–3k nested calls (for
-    example, `Term.eval sumTo_term 2500 0`).
-
-  Native Lean compiles these tail-recursive functions to loops, so it has no such limit. This does
-  not affect termination or soundness, only resources. A fix would need an evaluator with an
-  explicit continuation stack and a new agreement proof.
+* **Stack depth** (fixed for loops and tail calls, `STACK_OVERFLOW.md`). Compiled code and
+  `#eval` run the jump machine (`PCL/Lang/Machine.lean`, `PCL/Lang/Fix.lean`), proved equal to
+  `Expr.eval` and substituted for it by `@[csimp]` lemmas: loop iterations and tail calls
+  (`let v := self args in ret v`) run as jumps and use no stack.  Non-tail recursive calls
+  (`ack`, `hyper`, `diagonal`) still use one stack segment per nested call.
 * **No sharing** ([documented], `GRAMMAR.md`). A Lean `let` with a call-free value is substituted,
   so a value used twice is computed twice. For example, `let x := n * n; x + x` is accepted and
   evaluates `n * n` twice. A pure `let` statement would fix this; it is listed as a possible next
   step, not implemented.
-* **Loops use stack too** ([documented], `STACK_OVERFLOW.md`). A loop (recursive join point,
-  including a `wf_while` loop) runs each iteration as a jump through `WellFounded.fix`, which
-  uses a few stack frames per iteration in the interpreter; the runtime check of
-  `diagonalWhile` in `Tests/While.lean` is limited to about 1 000 iterations for this reason.
 * **Inlined loops are per call site** ([documented], `Tests/Loops.lean`). A tail-recursive
   `@[inlinable]` helper called twice gives two loops, as inlining does. Recursive helpers with
   non-tail self calls are shared as global functions (the local-function context was removed,
@@ -182,6 +176,7 @@ Ordered by how many ordinary Lean functions each item would unlock, as a judgeme
    back to `omega`/`simp` when Lean's proof term does not match (`nestMin`).
 4. **Mutual recursion with different signatures**, by padding parameters and tagging results, as
    is already done for recursion through a function argument.
-5. **An explicit-stack evaluator**, to remove the stack-depth limit for tail calls.
+5. **An explicit-stack evaluator for non-tail calls** (loops and tail calls already run in
+   constant stack), or compiling programs to closures to cut the interpretive overhead.
 6. **User inductive types**: the largest change, touching `Ty`, `PExpr`, the translation and
    `wf_agree`.

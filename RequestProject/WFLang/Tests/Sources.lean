@@ -17,12 +17,12 @@ theorems into `SourceProofs.lean`.  This file accounts for **each** of those fun
 | `ack2`                       | Ack       | captured (recursion through `ackInner`'s function argument) | `ack2_term_agree` below; also `ack2_agree` (via `ack`) |
 | `ackWhile`                   | Ack       | rejected: `while` loop with no simple measure | runtime check below  |
 | `…Cantor….pair`              | Ack       | captured (no recursion)             | `ExNonRec.pair_agree` |
-| `…Cantor….isqrt`             | Ack       | captured (`while` loop, `Tests/LeanWhile.lean`) | `LeanWhilePCL.isqrt_agree` (under `LoopLaw`) |
-| `…Cantor….unpairLeft/Right`  | Ack       | captured (calls `isqrt`, `Tests/LeanWhile.lean`) | `LeanWhilePCL.unpairLeft_agree`, `…unpairRight_agree` (under `LoopLaw`) |
+| `…Cantor….isqrt`             | Ack       | captured (`while` loop, `Tests/LeanWhile.lean`) | `LeanWhilePCL.isqrt_agree` |
+| `…Cantor….unpairLeft/Right`  | Ack       | captured (calls `isqrt`, `Tests/LeanWhile.lean`) | `LeanWhilePCL.unpairLeft_agree`, `…unpairRight_agree` |
 | `…Cantor….ackNoDataStructure`| Ack       | rejected: `while` loop with no simple measure | runtime check below  |
 | `diagonal`                   | Diagonal  | captured                            | `ExPCL.diagonal_agree` |
 | `diagonal_tr`                | Diagonal  | captured                            | `ExPCL.diagonal_tr_agree` |
-| `diagonalWhile`              | Diagonal  | captured (`while` loop, measure given in `Tests/LeanWhile.lean`) | `LeanWhilePCL.diagonalWhile_agree`; `LeanWhileProofs.diagonalWhile_eq` (under `LoopLaw`) |
+| `diagonalWhile`              | Diagonal  | captured (`while` loop, measure given in `Tests/LeanWhile.lean`) | `LeanWhilePCL.diagonalWhile_agree`; `LeanWhileProofs.diagonalWhile_eq` |
 | `hyper`                      | Hyper     | captured (global function)          | `ExPCL.hyper_agree`  |
 | `hyperBase`                  | Hyper     | captured (no recursion)             | `ExNonRec.hyperBase_agree` |
 | `hyperLoop`                  | Hyper     | captured when specialised, e.g. `(hyperLoop (hyperBase 2))` | `hyperLoop_agree` below |
@@ -31,7 +31,7 @@ theorems into `SourceProofs.lean`.  This file accounts for **each** of those fun
 | `mc91`                       | Mc91      | captured (no recursion)             | `ExNonRec.mc91_agree` |
 | `mc91Loop`                   | Mc91      | captured                            | `ExPCL.mc91Loop_agree` |
 | `mc91TR`                     | Mc91      | captured (calls `mc91Loop`)         | `MorePCL.mc91TR_agree` |
-| `mc91While`                  | Mc91      | captured (`while` loop, measure given in `Tests/LeanWhile.lean`) | `LeanWhilePCL.mc91While_agree`; `LeanWhileProofs.mc91While_eq` (under `LoopLaw`) |
+| `mc91While`                  | Mc91      | captured (`while` loop, measure given in `Tests/LeanWhile.lean`) | `LeanWhilePCL.mc91While_agree`; `LeanWhileProofs.mc91While_eq` |
 | `iter`                       | Mc91      | captured when specialised: `(iter mc91)` | `iter_mc91_agree'` below; also `iter_mc91_agree` (via `mc91Loop`) |
 | `Safe`                       | Boom      | rejected: a proposition             | —                    |
 | `boom`                       | Boom      | captured (precondition `Safe n`)    | `boom_agree` below   |
@@ -41,9 +41,9 @@ theorems into `SourceProofs.lean`.  This file accounts for **each** of those fun
 
 "via `f`" means: the function itself cannot be captured, but a theorem of the uploaded file
 (`SourceProofs.lean`) says it equals a captured function `f`, so the `PCL` program of `f`
-computes it; the agreement theorem is proved here.  Lean's `while` loop (`Lean.Loop.forIn`) is a
-`partial def`, opaque to the logic: the agreement theorems of the `while`-loop functions
-(`Tests/LeanWhile.lean`) assume its unfolding law `WFLang.LoopLaw` as a hypothesis.  The two
+computes it; the agreement theorem is proved here.  Lean's `while` loop (`Lean.Loop.forIn`)
+unfolds by `WFLang.loopLaw` (a theorem since Lean v4.34), so the agreement theorems of the
+`while`-loop functions (`Tests/LeanWhile.lean`) have no hypothesis.  The two
 loops without a simple measure (`ackWhile`, `ackNoDataStructure`) are only compared with the
 `PCL` programs on sample inputs, as are the other loops (below).
 -/

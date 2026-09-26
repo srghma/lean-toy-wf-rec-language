@@ -9,9 +9,9 @@ first: control flow (`if`/`match` with calls in non-tail position, `match` on `B
 patterns, `match h : …`), operators, `Int`/pairs/lists, subtype results (postconditions),
 bounded loops and `Nat.fold`, specialised higher-order functions, and recursion through a
 function argument.  Each is captured by `#lean_wf_func_to_term`, its agreement theorem is proved
-by `wf_agree`, and it is checked at runtime (`#guard_msgs`).  `underLambda` is still rejected;
-its error message is pinned by `#expect_reject` (from `MoreChecks.lean`).  `GAPS.md` at the
-project root describes each construct and what is left.
+by `wf_agree`, and it is checked at runtime (`#guard_msgs`).  `underLambda` (a recursive call
+inside `List.map` over `List.attach`) is captured in `Map.lean`.  `GAPS.md` at the project root
+describes each construct and what is left.
 -/
 
 
@@ -241,12 +241,6 @@ open WFLang Gaps GapsPCL
 #guard_msgs in
 #eval (List.range 12).all fun n => PCL.Term.eval nestedBound_term n == (nestedBound n).val
 
-/-! ## Rejections -/
-
--- A recursive call under `fun` in `List.map` over `List.attach`: `List.map` is a library
--- function (not specialised), and the elements of `attach` are subtypes whose property the
--- termination proof needs.
-/-- info: rejected: #lean_wf_func_to_term: call in an unsupported position -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term underLambda : PCL.Term ⟨[.nat], .nat⟩)
+-- `underLambda` (a recursive call under `fun` in `List.map` over `List.attach`) is captured
+-- in `Map.lean`.
 

@@ -30,7 +30,7 @@ namespace WFLang.PCL
 recursive call made by its body when it is jumped to with a given argument (or `none`).  The
 calls go below `c0`, the current parameters of the enclosing function (the same at the
 definition of the join point and at each jump to it). -/
-def JFirst {params : List Ty} (R : Env params → Env params → Prop) (pre : Env params → Prop)
+@[reducible] def JFirst {params : List Ty} (R : Env params → Env params → Prop) (pre : Env params → Prop)
     (c0 : Env params) : {Γ : List Ty} → {t : Ty} → JScope Γ t → Env Γ → Type
   | _, _, .nil, _ => Unit
   | _, _, .bind js s P _, e =>
@@ -54,29 +54,38 @@ is reached first.  A `jump` continues with the body of the join point (`jf`).  C
 functions are complete calls: they are run, and the first recursive call is looked for in the
 rest.  A recursive join point (a loop inside the body) is followed by well-founded recursion
 on its own relation: each back edge re-enters its body, until the body makes a recursive call
-of the enclosing function or leaves the loop. -/
+of the enclosing function or leaves the loop.  A `map` node looks for the first recursive call in
+its body, element by element; if the body makes none, the map is evaluated with the handler `h`
+(the values of the recursive calls already completed, which none of these runs needs) and the
+first recursive call is looked for in the rest. -/
 def Expr.firstCall {GL : List Fn} (ge : FEnv GL) : {Γ : List Ty} → {G : Env Γ → Prop} →
     {sf : Self Γ} →
     {t : Ty} → {Q : Env Γ → t.denote → Prop} → {js : JScope Γ t} →
-    Expr GL Γ G (some sf) t Q js → (e : Env Γ) → G e →
+    Expr GL Γ G (some sf) t Q js → (e : Env Γ) → G e → Handler (some sf) e →
     JFirst sf.R sf.pre (sf.cur e) js e →
     Option {y : Env sf.params // sf.R y (sf.cur e) ∧ sf.pre y}
-  | _, _, _, _, _, _, .ret _ _ _, _, _, _ => none
-  | _, _, _, _, _, _, .ite c _ a b, e, g, jf =>
-      if hc : c.eval e = true then a.firstCall ge e ⟨g, hc⟩ jf
-      else b.firstCall ge e ⟨g, Bool.eq_false_iff.mpr hc⟩ jf
-  | _, _, _, _, _, _, .fixSelfCall args _ dec hpre _, e, g, _ =>
+  | _, _, _, _, _, _, .ret _ _ _, _, _, _, _ => none
+  | _, _, _, _, _, _, .ite c _ a b, e, g, h, jf =>
+      if hc : c.eval e = true then a.firstCall ge e ⟨g, hc⟩ h jf
+      else b.firstCall ge e ⟨g, Bool.eq_false_iff.mpr hc⟩ h jf
+  | _, _, _, _, _, _, .fixSelfCall args _ dec hpre _, e, g, _, _ =>
       some ⟨args.eval e, dec e g, hpre e g⟩
-  | _, _, _, _, _, _, .gCall i args _ hpre k, e, g, jf =>
+  | _, _, _, _, _, _, .gCall i args _ hpre k, e, g, h, jf =>
       k.firstCall ge ((i.get ge (args.eval e) (hpre e g)).1, e)
-        ⟨g, (i.get ge (args.eval e) (hpre e g)).2⟩ jf
-  | _, _, _, _, _, _, .join _ _ body m, e, g, jf =>
-      m.firstCall ge e g ((fun v hv => body.firstCall ge (v, e) ⟨g, hv⟩ jf), jf)
-  | _, _, _, _, _, _, .joinrec _ P _ wf body m, e, g, jf =>
+        ⟨g, (i.get ge (args.eval e) (hpre e g)).2⟩ (Handler.push h) jf
+  | _, _, _, _, _, _, .map _ _ l _ body k, e, g, h, jf =>
+      ((l.eval e).attach.findSome? fun x =>
+          body.firstCall ge (x.1, e) ⟨g, x.2⟩ (Handler.push h) ()).or
+        (k.firstCall ge ((l.eval e).attach.map fun x =>
+          (body.eval ge (x.1, e) ⟨g, x.2⟩ (Handler.push h) ()).1, e) g (Handler.push h) jf)
+  | _, _, _, _, _, _, .join _ _ body m, e, g, h, jf =>
+      m.firstCall ge e g h ((fun v hv => body.firstCall ge (v, e) ⟨g, hv⟩ (Handler.push h) jf), jf)
+  | _, _, _, _, _, _, .joinrec _ P _ wf body m, e, g, h, jf =>
       let F := (wf e).fix (C := fun x => P e x → Option _)
-        (fun x ih hx => body.firstCall ge (x, e) ⟨g, hx⟩ ((fun y hy => ih y hy.2 hy.1), jf))
-      m.firstCall ge e g ((fun v hv => F v hv), jf)
-  | _, _, _, _, _, _, .jump i p _ hpre _, e, g, jf =>
+        (fun x ih hx => body.firstCall ge (x, e) ⟨g, hx⟩ (Handler.push h)
+          ((fun y hy => ih y hy.2 hy.1), jf))
+      m.firstCall ge e g h ((fun v hv => F v hv), jf)
+  | _, _, _, _, _, _, .jump i p _ hpre _, e, g, _, jf =>
       i.getFirst jf (p.eval e) (hpre e g)
 
 /-- The first recursive call always goes down along `R`. -/
@@ -84,8 +93,9 @@ theorem firstCall_dec {GL : List Fn} (ge : FEnv GL) {params : List Ty} {r : Ty}
     {R : Env params → Env params → Prop}
     {pre : Env params → Prop} {post : Env params → r.denote → Prop}
     (body : Expr GL params pre (some (Self.top params r R pre post)) r post .nil)
-    (x : Env params) (hx : pre x) (y : {y : Env params // R y x ∧ pre y})
-    (_ : body.firstCall ge x hx () = some y) :
+    (x : Env params) (hx : pre x) (h : Handler (some (Self.top params r R pre post)) x)
+    (y : {y : Env params // R y x ∧ pre y})
+    (_ : body.firstCall ge x hx h () = some y) :
     R y.1 x :=
   y.2.1
 
@@ -98,10 +108,11 @@ theorem fix_body_reaches_base {GL : List Fn} (ge : FEnv GL) {params : List Ty} {
     {pre : Env params → Prop} {post : Env params → r.denote → Prop}
     (wf : WellFounded R) (body : Expr GL params pre (some (Self.top params r R pre post)) r post .nil)
     (x : Env params) (hx : pre x) :
-    ∃ z, Relation.ReflTransGen R z x ∧ ∃ hz : pre z, body.firstCall ge z hz () = none := by
+    ∃ z, Relation.ReflTransGen R z x ∧ ∃ hz : pre z,
+      body.firstCall ge z hz (fun y _ hy => fixFn ge wf body y hy) () = none := by
   induction x using wf.induction with
   | _ x IH =>
-    cases h : body.firstCall ge x hx () with
+    cases h : body.firstCall ge x hx (fun y _ hy => fixFn ge wf body y hy) () with
     | none => exact ⟨x, .refl, hx, h⟩
     | some y =>
       obtain ⟨z, hz, hbase⟩ := IH y.1 y.2.1 y.2.2
@@ -113,7 +124,8 @@ theorem fix_body_has_base_case {GL : List Fn} (ge : FEnv GL) {params : List Ty} 
     {R : Env params → Env params → Prop} {pre : Env params → Prop}
     {post : Env params → r.denote → Prop} (wf : WellFounded R)
     (body : Expr GL params pre (some (Self.top params r R pre post)) r post .nil)
-    (x : Env params) (hx : pre x) : ∃ z, ∃ hz : pre z, body.firstCall ge z hz () = none :=
+    (x : Env params) (hx : pre x) :
+    ∃ z, ∃ hz : pre z, body.firstCall ge z hz (fun y _ hy => fixFn ge wf body y hy) () = none :=
   (fix_body_reaches_base ge wf body x hx).imp fun _ h => h.2
 
 /-- **The looping program cannot be written.**  `fix self x. let v := self x in v` would need

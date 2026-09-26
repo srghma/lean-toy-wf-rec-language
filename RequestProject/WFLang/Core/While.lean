@@ -50,11 +50,11 @@ theorem whileWF_eq (b : β) (hb : inv b) :
 
 theorem whileWF_of_true (b : β) (hb : inv b) (h : c b = true) :
     whileWF R wf inv c body step b hb = whileWF R wf inv c body step (body b) (step b hb h).1 := by
-  rw [whileWF_eq, dif_pos h]
+  rw [whileWF_eq, dite_eq_left h]
 
 theorem whileWF_of_false (b : β) (hb : inv b) (h : c b = false) :
     whileWF R wf inv c body step b hb = b := by
-  rw [whileWF_eq, dif_neg (by simp [h])]
+  rw [whileWF_eq, dite_eq_right (by simp [h])]
 
 /-- **The loop equation has only one solution** (on the states satisfying the invariant). -/
 theorem whileWF_unique (W : (b : β) → inv b → β)
@@ -66,8 +66,8 @@ theorem whileWF_unique (W : (b : β) → inv b → β)
     intro hb
     rw [whileWF_eq, hW]
     by_cases h : c b = true
-    · rw [dif_pos h, dif_pos h]; exact IH _ (step b hb h).2 _
-    · rw [dif_neg h, dif_neg h]
+    · rw [dite_eq_left h, dite_eq_left h]; exact IH _ (step b hb h).2 _
+    · rw [dite_eq_right h, dite_eq_right h]
 
 /-- **Partial correctness for free:** the result satisfies the invariant and the exit
 condition. -/
@@ -153,7 +153,7 @@ noncomputable def loopVal {β : Type} (c : β → Bool) (body : β → β) (b : 
 theorem loopVal_of_exit {β : Type} {c : β → Bool} {body : β → β} {b y : β}
     (h : IsLoopExit c body b y) : loopVal c body b = y := by
   have hex : ∃ y, IsLoopExit c body b y := ⟨y, h⟩
-  rw [loopVal, dif_pos hex]
+  rw [loopVal, dite_eq_left hex]
   exact (Classical.choose_spec hex).unique h
 
 theorem whileWF_isLoopExit {β : Type} (R : β → β → Prop) (wf : WellFounded R) (inv : β → Prop)

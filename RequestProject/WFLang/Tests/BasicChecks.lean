@@ -50,5 +50,18 @@ open WFLang
     PCL.Term.eval ExNonRec.hyperBase_term n a == Tco.hyperBase n a &&
     PCL.Term.eval ExNonRec.pair_term n a == Tco.AckWithoutStackButUsingCantorPairing.pair n a
 
+/-! ## Deep tail recursion
+
+A tail call `let v := self args in ret v` of a global function is run as a jump
+(`PCL/Lang/Fix.lean`, `fixS`), so tail-recursive programs run in constant stack: here
+`sumTo 50000` (50 000 nested calls) and `diagonal_tr 300 0 0` (45 450 calls).  Before, the
+interpreter aborted with a `deep recursion` error at about 2 500 nested calls
+(`STACK_OVERFLOW.md`). -/
+
+/-- info: true -/
+#guard_msgs in
+#eval PCL.Term.eval ExPCL.sumTo_term 50000 0 == sumTo 50000 0 &&
+  ExPCL.diagonal_tr_run 300 0 0 == Tco.diagonal_tr 300 0 0
+
 -- The uploaded functions that are rejected (`boom`, `iter`, `while` loops, higher-order
 -- functions) are checked in `Sources.lean`.

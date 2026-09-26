@@ -158,6 +158,12 @@ def evalUn (op : Name) (a : LitVal) : Option LitVal :=
   | ``WFLang.UnOp.tail, .list t xs => some (.list t xs.tail)
   | ``WFLang.UnOp.isNil, .list _ xs => some (.bool xs.isEmpty)
   | ``WFLang.UnOp.length, .list _ xs => some (.nat xs.length)
+  | ``WFLang.UnOp.range, .nat n =>
+    if n ≤ 32 then some (.list (mkConst ``WFLang.Ty.nat) ((List.range n).map .nat)) else none
+  | ``WFLang.UnOp.sum, .list _ xs =>
+    xs.foldr (fun x acc => match x, acc with
+      | .nat a, some (.nat b) => some (.nat (a + b))
+      | _, _ => none) (some (.nat 0))
   | _, _ => none
 
 /-- `!a`, simplified. -/

@@ -165,10 +165,14 @@ itself, and `isqrt` for `isqrtSum` and `evenSqrt`.  No loop needs a global funct
   PCL.Term.eval WhilePCL.isqrtNewton_term n == Tco.AckWithoutStackButUsingCantorPairing.isqrt n &&
   PCL.Term.eval WhilePCL.isqrt_term n == Tco.AckWithoutStackButUsingCantorPairing.isqrt n &&
   PCL.Term.eval WhilePCL.mc91While_term (3 * n) == Tco.mc91While (3 * n) &&
-  -- (`diagonalWhile m n` runs about `(m + n)² / 2` iterations, each a jump in the evaluator,
-  -- which uses stack: see `STACK_OVERFLOW.md`)
-  (n < 40 && (List.range 8).all fun m =>
-    PCL.Term.eval WhilePCL.diagonalWhile_term m n == Tco.diagonalWhile m n) || 40 ≤ n
+  (List.range 8).all fun m =>
+    PCL.Term.eval WhilePCL.diagonalWhile_term m n == Tco.diagonalWhile m n
+
+-- `diagonalWhile 0 n` runs `n (n + 1) / 2` loop iterations (here 80 200).  Loops run in constant
+-- stack (`PCL/Lang/Machine.lean`, see `STACK_OVERFLOW.md`).
+/-- info: true -/
+#guard_msgs in
+#eval PCL.Term.eval WhilePCL.diagonalWhile_term 0 400 == Tco.diagonalWhile 0 400
 
 /-- info: true -/
 #guard_msgs in

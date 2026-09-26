@@ -1,3 +1,118 @@
+# Summary of changes for run a7fcc4b7-bae6-4c42-8bd3-afa6a4db5ade
+`underLambda` is now captured by `#lean_wf_func_to_term`, and its agreement theorem is proved. The project already had this support when I started, so I didn't need to write any new capture code. Earlier summaries still list `underLambda` as rejected, so I checked that the support actually works.
+
+**How it works.** `List.map` is a statement of the language, `let v := map (fun x => body) l in k`. The body can contain calls, including recursive calls to the function being captured. A Lean `l.attach.map (fun ⟨x, h⟩ => …)` becomes `map (fun x => …) l`. The program itself holds no membership proof. Instead, the fact `x ∈ l` is available to the termination (decrease) proofs, which is the property of the `attach` elements you mentioned. The agreement proofs connect the two forms using `List.attach_map_val`.
+
+**What's in `RequestProject/WFLang/Tests/Map.lean`:**
+- `underLambda_term := #lean_wf_func_to_term Gaps.underLambda` and `underLambda_agree : ∀ n, PCL.Term.eval underLambda_term n = Gaps.underLambda n`, proved by `wf_agree`.
+- `#print axioms` on it lists only `propext` and `Quot.sound`. The placeholder for erased proofs doesn't appear in any of the three theorems I checked.
+- `divTree`, `attachVal` (reads the element with `x.1` instead of a pattern), `mapIf` (the recursive call is inside an `if`), plain `List.map` examples and nested maps. Each has an agreement theorem.
+- A check that each `underLambda` program contains exactly one `map` node, and runtime comparisons against the compiled Lean functions (e.g. both give 32 for `underLambda 6`).
+
+**Your rejection test** (`#expect_reject (#lean_wf_func_to_term underLambda …)`) is no longer in the project. It would fail now, because the capture succeeds.
+
+**Changes this session:**
+- **Build fix:** `lake-manifest.json` again pinned Mathlib at its v4.28.0 commit, which doesn't build with the project's Lean v4.34.0. I re-pinned it to Mathlib `v4.34.0`, the version `lakefile.toml` asks for, and downloaded the prebuilt Mathlib files.
+- **Docs:** `GAPS.md` still marked `underLambda` as rejected in its table. That row now says it is captured and points to `Tests/Map.lean`.
+- **Properties table:** added a row for `underLambda_agree`, marked proved.
+
+The full `lake build RequestProject wfbench` passes with no errors. There is no `sorry`, `axiom` or `@[implemented_by]` in the sources. All work is committed.
+
+**Still unsupported:** recursive calls under a `fun` passed to library functions other than `List.map`, such as `List.foldl`, `any`/`all` and `for x in l`.
+
+# Summary of changes for run 848068cb-ba7d-41cb-b6ca-7af3a86c4869
+Your `diagonalWhile` check is now a Lean theorem proved for all inputs, not a sampled `#eval`. The whole project builds with no errors or warnings, has no `sorry`, `axiom` or `@[implemented_by]`, and all work is committed.
+
+The faster evaluator from last turn was already in Lean: the proof that it gives the same results as the original evaluator, and the `@[csimp]` lemmas that make compiled code and `#eval` use it. What this turn adds is the new file `RequestProject/WFLang/Tests/EvalChecks.lean`, which is imported by `RequestProject/WFLang.lean` and so builds with the project.
+
+**Your check, for all inputs**
+- `WhilePCL.diagonalWhile_term_eq`: `∀ m n, Term.eval diagonalWhile_term m n = Tco.diagonalWhile m n`.
+  - The proof combines the capture's agreement theorem, a new loop-invariant proof for the `wf_while` version (`WhileProofs.diagonalWhile_eq_diagonal`), and the earlier `diagonalWhile m n = diagonal m n`.
+  - It uses only `propext`, `Classical.choice` and `Quot.sound`.
+- `WhilePCL.diagonalWhile_check`: your sampled check (every `n < 60`, `m < 8`, with no `n < 40` restriction) as a theorem that equals `true`. It is derived from the theorem above, not by running the evaluator.
+
+**Runs that used to crash**
+These four are proved with `native_decide`, which runs the compiled evaluator, so they also rely on trusting Lean's compiler:
+- `diagonalWhile 0 1000` = 500500 (500,500 loop iterations), and it equals the native `Tco.diagonalWhile 0 1000`;
+- `sumTo 100000 0` = 5000050000 (100,000 nested tail calls);
+- `diagonal_tr 1000 0 0` = 501500 (501,500 tail calls).
+
+Before last turn's change, each of these aborted with the deep-recursion error.
+
+**Not formalized:** how much stack the evaluator uses and how long it takes can't be stated in Lean's logic. The measured timings in `STACK_OVERFLOW.md` remain measurements only. I added a note there listing the new theorems.
+
+I added the two new results to the Properties table and marked them proved.
+
+# Summary of changes for run 22e8668c-fdbe-4e4f-a60e-138053912304
+You didn't say what kind of refactor you wanted. I asked, got no answer, and did a cleanup that keeps behaviour the same. No definition or theorem statement changed; only how the capture code is organised. The whole project and the benchmark (`lake build RequestProject wfbench`) build with no errors and no warnings. There is no `sorry`, `axiom` or `@[implemented_by]` in the sources. `gcd_agree` uses only `propext` and `Quot.sound`, and `LeanWhileProofs.diagonalWhile_eq` uses only `propext`, `Classical.choice` and `Quot.sound`. All work is committed.
+
+**Build fix, needed first.** The project didn't build at the start of this session. `lake-manifest.json` pinned Mathlib at its v4.28.0 commit, which doesn't work with the project's Lean v4.34.0. I updated it to Mathlib `v4.34.0` (the tag `lakefile.toml` asks for).
+
+**Repeated lists of simp lemmas, now defined once**
+- **New simp set `wflang_eval`** (registered in the new file `Core/EvalSimpAttr.lean`, applied in `Core/PExpr.lean`). It holds the evaluator's equations: `PExpr.eval`, `PExprs.eval`, `Var.get`, `BinOp.eval`, `UnOp.eval`, `Ty.beq` and `Ty.default`. The same seven lemmas had been copied into nine places: the proofs the capture generates for `while` loops, the tactics `wf_dec`, `wf_dec_tag` and `wf_dec_ho`, and `wf_agree`. All nine now use `simp [wflang_eval, …]`.
+- **`wf_agree`** had the same arithmetic and loop lemma list written out twice, and the same lemmas for unfolding a program run written out three times. These are now defined once each (`agreeSimpLemmas`, `runSimpLemmas`). A small helper `mergeNames` replaces two identical inline folds.
+
+**File splits.** The old file names still exist and import their parts, so no other file's imports changed.
+- `Capture/Elab.lean` (587 lines) is now:
+  - `Capture/Elab/Term.lean`: the global context and `#lean_wf_func_to_term`;
+  - `Capture/Elab/Agree.lean`: the `wf_agree` tactic.
+- `Capture/Stmt.lean` (521 lines) is now:
+  - `Capture/Stmt/Basic.lean`: its helper functions;
+  - `Capture/Stmt.lean`: the translation of a function body into statements.
+
+**Left as it was.** The translation code uses Lean's `sorryAx` as a placeholder for proofs it throws away (`erasedProof` in `Capture/Translate/Context.lean`). I said I would replace it, but didn't. Lean offers nothing else that can stand in for a proof of an arbitrary statement without adding an axiom. The placeholder only appears where the translation ignores the term, and no generated program or proof contains it (the axiom check above confirms this).
+
+`README.md` (the file layout section) and `GRAMMAR.md` now describe the new files. The results table is unchanged, because no statement changed. Rows naming `Capture/Elab.lean` still work, since that file imports both parts.
+
+If you meant a different refactor, tell me. The two alternatives I suggested were restructuring the `Term`/`Expr` datatype and moving the project to Lean's `module` system.
+
+# Summary of changes for run 23f35ac4-9493-446b-b5ab-7613dbe989a9
+The file split is Lean work, so there was no further statement to formalize. What was missing is that I had only checked the split in a separate copy of the project. That is fixed: the split project now builds cleanly in this repository.
+
+**Build fix.** `lake-manifest.json` pinned Mathlib at its v4.28.0 commit, while `lakefile.toml` and `lean-toolchain` ask for v4.34.0. That mismatch broke `lake build`. I updated the manifest to Mathlib `v4.34.0` (commit `5ed29652…`) and committed it; no Lean source changed.
+
+**Checks, run in the project itself:**
+- `lake build RequestProject wfbench` finishes all 1,094 jobs with no errors and no warnings.
+- There is no `sorry`, `axiom` or `@[implemented_by]` in the sources. The only text match for "sorry" is an existing placeholder in the translation code, not a proof gap.
+- A script checked the axioms of all 3,529 theorems in the project's modules, test files included. Every one uses only `propext`, `Classical.choice` and `Quot.sound`. This includes `gcd_agree` and `LeanWhileProofs.diagonalWhile_eq`.
+
+**The split** (under `RequestProject/WFLang/`; only code moved, no definition or proof changed):
+- `Capture/Meta.lean` (1,692 lines) became eight files in `Capture/Meta/`: `Signature`, `Fix`, `Calls`, `Callees`, `WFRel`, `Mutual`, `Tactics` and `Agree`.
+- `PCL/Lang.lean` (828 lines) became five files in `PCL/Lang/`: `Syntax`, `Eval`, `While`, `Program` and `Simp`.
+- `Capture/Translate.lean` handed its capture context to the new `Capture/Translate/Context.lean`.
+- `Capture/LeanWhile.lean` handed its helpers to the new `Capture/LeanWhile/Loops.lean`.
+
+The old file names still exist. `Capture/Meta.lean` and `PCL/Lang.lean` now just import their parts, so no other file's imports changed. The largest Lean file is now 411 lines. `README.md`, `GRAMMAR.md` and `CONTEXTS_ASSESSMENT.md` describe the new layout.
+
+Some rows in the results table may still name `PCL/Lang.lean` or `Capture/Meta.lean` as their file rather than the new part files. I couldn't review the whole table, so I left those rows unchanged. Those two files import all their parts, so the declarations are still reachable through them.
+
+# Summary of changes for run 9e0b2d06-cab6-49ca-b4cc-bd348c2aaa59
+The project now builds on `leanprover/lean4:v4.34.0` with Mathlib `v4.34.0`. The full `lake build` (868 jobs) and `lake build wfbench` pass with no errors, no warnings and no `sorry`.
+
+**Update**
+- The toolchain file and `lakefile.toml` already named v4.34.0, but `lake-manifest.json` still pinned Mathlib at its v4.28.0 commit. I ran `lake update mathlib`, which moved Mathlib to the `v4.34.0` tag (commit `5ed29652…`) and updated the other dependencies to match. The prebuilt Mathlib files were downloaded rather than compiled locally.
+- No proof needed changing for the new version. I made two small fixes:
+  - `Capture/Meta.lean`: removed an unused initial value that caused the only warning.
+  - `RequestProject/Scratch.lean`: deleted this leftover scratch file. It referred to declarations that no longer exist and was the only thing breaking the build.
+
+**`while` is now fully handled in proofs**
+- In v4.34 Lean defines `while` inside the logic. `WFLang.loopLaw` (the one-step unfolding of `while`) is therefore a theorem, proved from Lean's `Lean.Loop.forIn_eq_of_monadTail`. It is no longer a hypothesis.
+- Every `f.eq_wf` generated by `lean_while_to_wf`, and every agreement theorem for a captured `while` function, now has no extra hypothesis. This covers `isqrt`, `unpairLeft`, `unpairRight`, `diagonalWhile`, `mc91While`, `gcdW`, `firstSq`, `twoLoops`, `nested` and the rest.
+- Your theorem `diagonalWhile m n = diagonal m n` is proved with no hypothesis as `LeanWhileProofs.diagonalWhile_eq` in `Tests/LeanWhile.lean`. So is `mc91While n = mc91TR n`.
+- I checked the axioms of all 3,566 theorems in the project, test files included. Every one uses only `propext`, `Classical.choice` and `Quot.sound`.
+- These are still rejected: `return` inside a loop, recursive functions that contain a loop, and `ackWhile` / `ackNoDataStructure`, whose measure isn't available.
+
+**Proofs inside `Term`**
+Following your correction, `README.md` and `GRAMMAR.md` now describe proof erasure as how the current capture works, not a rule of the language: programs may carry proofs where that is needed. I didn't change the capture itself, because nothing currently needs it.
+
+**Docs**
+I rewrote the comments that still described `while` as opaque or unprovable: the header of `Tests/SourceProofs.lean`, a comment in `Tests/LeanWhile.lean`, the header of `Tests/WhileFunctions.lean`, and `UNSUPPORTED.md`.
+
+**Properties table**
+I added three entries, all marked proved: `loopLaw`, `diagonalWhile_eq`, and the agreement theorems for the `while` functions. The full table was too long for me to read back, so some older entries may still describe `while` as needing a hypothesis or as rejected.
+
+All work is committed.
+
 # Summary of changes for run 19e5890b-693b-4cf5-8c73-5f570ae246ec
 Every grammar datatype that can support these classes now has them. `Functor`/`Traversable` can't be instantiated directly because none of the types has the right shape, so I added the matching operations over variables, with their laws proved. The whole project (all 844 jobs, including the existing tests and `wfbench`) builds with no `sorry` and no warnings. The new laws use only the standard axioms.
 

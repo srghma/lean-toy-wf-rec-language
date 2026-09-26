@@ -1,14 +1,13 @@
-import RequestProject.WFLang.Capture.Meta
-import RequestProject.WFLang.Core.LeanWhile
+import RequestProject.WFLang.Capture.LeanWhile.Loops
 
 /-!
 # Capturing Lean's own `while` loops
 
 Lean's `while` (and `repeat`) in `do` notation is `forIn Lean.Loop.mk init step`, and
-`Lean.Loop.forIn` is a `partial def`: there is no termination proof to reuse, and the loop cannot
-be unfolded in proofs.  `lean_while_to_wf f` turns such a function into a well-founded one that
-`#lean_wf_func_to_term` captures, and proves that the two agree under the unfolding law of
-`while` (`WFLang.LoopLaw`, an explicit hypothesis):
+`Lean.Loop.forIn` carries no termination argument (it is defined through `repeatM`, a least
+fixed point, and unfolds by `WFLang.loopLaw`).  `lean_while_to_wf f` turns such a function into a
+well-founded one that `#lean_wf_func_to_term` captures, and proves that the two agree (by
+unfolding `while` with `WFLang.loopLaw` along the well-founded recursion):
 
 ```
 lean_while_to_wf diagonalWhile
@@ -27,222 +26,22 @@ For the `i`-th loop of `f` (in source order) it adds
   `(x₁', …)`.  Its termination argument is the `i`-th `termination_by` / `decreasing_by` given
   to `lean_while_to_wf` (by default Lean guesses a measure, as for any `def`); it is marked
   `@[inlinable]`, so the capture turns it into a `PCL` loop (a recursive join point);
-* `f.loop_i_eq : LoopLaw → ∀ fvs b, forIn Lean.Loop.mk b (f.body_i fvs) = …(f.loop_i fvs b…)`;
+* `f.loop_i_eq : ∀ fvs b, forIn Lean.Loop.mk b (f.body_i fvs) = …(f.loop_i fvs b…)`;
 
 and then
 
 * `f.wf`: `f` with every loop replaced by a call of its `f.loop_i` (and every call of a function
   `g` for which `g.wf` exists replaced by `g.wf`), marked `@[inlinable]`;
-* `f.eq_wf : LoopLaw → ∀ xs, f xs = f.wf xs`.
+* `f.eq_wf : ∀ xs, f xs = f.wf xs`.
 
 `#lean_wf_func_to_term f` captures `f.wf` (running `lean_while_to_wf f` with the default
 termination arguments first if needed), and `wf_agree` proves `∀ xs, Term.eval t xs = f xs`
-from a hypothesis `h : LoopLaw` in context.
+(rewriting `f` into `f.wf` with `f.eq_wf`).
 -/
 
 namespace WFLang.LeanWhile
 
 open Lean Meta Elab Term
-
-/-! ## Recognising loops -/
-
-/-- `@forIn Id Lean.Loop Unit inst β Lean.Loop.mk init body`: `(β, init, body)`. -/
-def loopForIn? (e : Lean.Expr) : Option (Lean.Expr × Lean.Expr × Lean.Expr) :=
-  if e.isAppOfArity ``ForIn.forIn 8 && (e.getArg! 0).isConstOf ``Id &&
-      (e.getArg! 1).isConstOf ``Lean.Loop then
-    some (e.getArg! 4, e.getArg! 6, e.getArg! 7)
-  else none
-
-/-- Does `e` contain a Lean `while` loop? -/
-def hasLoop (e : Lean.Expr) : Bool :=
-  (e.find? fun x => (loopForIn? x).isSome).isSome
-
-/-- `@Bind.bind Id _ α γ x k`: `(α, γ, x, k)`. -/
-def idBind? (e : Lean.Expr) : Option (Lean.Expr × Lean.Expr × Lean.Expr × Lean.Expr) :=
-  if e.isAppOfArity ``Bind.bind 6 && (e.getArg! 0).isConstOf ``Id then
-    some (e.getArg! 2, e.getArg! 3, e.getArg! 4, e.getArg! 5)
-  else none
-
-/-- `@Pure.pure Id _ α x`: `x`. -/
-def idPure? (e : Lean.Expr) : Option Lean.Expr :=
-  if e.isAppOfArity ``Pure.pure 4 && (e.getArg! 0).isConstOf ``Id then some (e.getArg! 3)
-  else none
-
-/-! ## Tuples of mutable variables -/
-
-/-- The types of the mutable variables of a loop whose state has type `β` (`MProd τ₁ (MProd τ₂ …)`
-as built by `do` notation, or a single type). -/
-partial def stateTys (β : Lean.Expr) : List Lean.Expr :=
-  let β := β.consumeMData
-  if β.isAppOfArity ``MProd 2 then β.getArg! 0 :: stateTys (β.getArg! 1) else [β]
-
-/-- `MProd.mk v₁ (MProd.mk v₂ …)`. -/
-def mkMProd : List Lean.Expr → List Lean.Expr → MetaM Lean.Expr
-  | [v], _ => return v
-  | v :: vs, _ :: ts => do
-    let rest ← mkMProd vs ts
-    mkAppM ``MProd.mk #[v, rest]
-  | _, _ => throwError "lean_while_to_wf: empty loop state"
-
-/-- The components of a loop state `e : MProd τ₁ (…)` with `n` components (the fields of a
-literal `MProd.mk`, projections otherwise). -/
-partial def mprodComps (e : Lean.Expr) (n : Nat) : MetaM (List Lean.Expr) := do
-  if n ≤ 1 then return [e]
-  let e' := e.consumeMData.headBeta
-  if e'.isAppOfArity ``MProd.mk 4 then
-    return e'.getArg! 2 :: (← mprodComps (e'.getArg! 3) (n - 1))
-  return (← mkAppM ``MProd.fst #[e]) :: (← mprodComps (← mkAppM ``MProd.snd #[e]) (n - 1))
-
-/-- The tuple `(v₁, (v₂, …))`. -/
-def mkTuple : List Lean.Expr → MetaM Lean.Expr
-  | [v] => return v
-  | v :: vs => do mkAppM ``Prod.mk #[v, ← mkTuple vs]
-  | [] => throwError "lean_while_to_wf: empty loop state"
-
-/-- The type `τ₁ × (τ₂ × …)`. -/
-def mkTupleTy : List Lean.Expr → MetaM Lean.Expr
-  | [t] => return t
-  | t :: ts => do mkAppM ``Prod #[t, ← mkTupleTy ts]
-  | [] => throwError "lean_while_to_wf: empty loop state"
-
-/-- The components of a tuple `p` of `n` values. -/
-def tupleComps (p : Lean.Expr) (n : Nat) : MetaM (List Lean.Expr) := do
-  let mut out := #[]
-  let mut cur := p
-  for i in [0:n] do
-    if i + 1 == n then out := out.push cur
-    else
-      out := out.push (← mkAppM ``Prod.fst #[cur])
-      cur ← mkAppM ``Prod.snd #[cur]
-  return out.toList
-
-/-- The names of the mutable variables, read off the `have x := r.fst` bindings at the start of
-the loop body `fun _ r => …` (`s₁, s₂, …` if not found). -/
-partial def stateNames (body : Lean.Expr) (n : Nat) : MetaM (List Name) := do
-  let dflt := (List.range n).map fun i => Name.mkSimple s!"s{i + 1}"
-  lambdaBoundedTelescope body 2 fun zs b => do
-    unless zs.size == 2 do return dflt
-    let r := zs[1]!
-    -- the projection chains of `r` for each component
-    let mut paths : Array Lean.Expr := #[]
-    let mut cur := r
-    for i in [0:n] do
-      if i + 1 == n then paths := paths.push cur
-      else
-        paths := paths.push (← mkAppM ``MProd.fst #[cur])
-        cur ← mkAppM ``MProd.snd #[cur]
-    let mut found : Array (Option Name) := Array.replicate n none
-    let mut e := b
-    repeat
-      let e' := e.consumeMData
-      let .letE nm _ v bd _ := e' | break
-      let v := v.consumeMData
-      if let some i := paths.findIdx? (· == v) then
-        if found[i]!.isNone then found := found.set! i (some nm)
-      e := bd.instantiate1 v
-    return (List.range n).map fun i => (found[i]!).getD dflt[i]!
-
-/-! ## Simplification of the generated code -/
-
-/-- Reduce projections of constructor applications (`(MProd.mk a b).fst`, `(a, b).2`),
-matchers applied to constructors and `have x := y` with `y` a variable, in the generated code. -/
-def cleanup (e : Lean.Expr) : MetaM Lean.Expr :=
-  Meta.transform e (post := fun e => do
-    let e := e.headBeta
-    -- the `Id` monad
-    if e.isAppOfArity ``Id.run 2 then return .visit (e.getArg! 1)
-    if let some x := idPure? e then return .visit x
-    if let some (α, _, x, k) := idBind? e then
-      if let .lam n _ b _ := k.consumeMData then
-        if !b.hasLooseBVars then return .visit b
-        return .visit (Lean.mkLet n α x b (nondep := true))
-      return .visit (mkApp k x).headBeta
-    if (e.isAppOfArity ``MProd.fst 3 || e.isAppOfArity ``Prod.fst 3) then
-      let a := (e.getArg! 2).consumeMData
-      if a.isAppOfArity ``MProd.mk 4 || a.isAppOfArity ``Prod.mk 4 then
-        return .visit (a.getArg! 2)
-    if (e.isAppOfArity ``MProd.snd 3 || e.isAppOfArity ``Prod.snd 3) then
-      let a := (e.getArg! 2).consumeMData
-      if a.isAppOfArity ``MProd.mk 4 || a.isAppOfArity ``Prod.mk 4 then
-        return .visit (a.getArg! 3)
-    if let .proj _ i a := e then
-      let a := a.consumeMData
-      if a.isAppOfArity ``MProd.mk 4 || a.isAppOfArity ``Prod.mk 4 then
-        return .visit (a.getArg! (2 + i))
-    if let .letE _ _ v b _ := e then
-      -- the destructuring of the loop state: variables, tuples and projections
-      let v' := v.consumeMData
-      if v'.isFVar || v'.isAppOfArity ``MProd.mk 4 || v'.isAppOfArity ``MProd.fst 3 ||
-          v'.isAppOfArity ``MProd.snd 3 || v'.isAppOfArity ``Prod.fst 3 ||
-          v'.isAppOfArity ``Prod.snd 3 || v'.isAppOfArity ``Prod.mk 4 ||
-          (v'.isAppOfArity ``PUnit.unit 0) || v'.isConstOf ``PUnit.unit || v'.isConstOf ``Unit.unit then
-        return .visit (b.instantiate1 v)
-    if (← matchMatcherApp? e).isSome then
-      if let .reduced r ← withReducible (Meta.reduceMatcher? e) then
-        return .visit r.headBeta
-    return .continue)
-
-/-! ## The loop as a tail-recursive function -/
-
-/-- The loop body `e : Id (ForInStep β)` as the body of the tail-recursive loop function:
-`ForInStep.yield b` becomes `rec b` (the recursive call on the components of `b`), and
-`ForInStep.done b` becomes `ret b` (the tuple of the components of `b`), through `let`s, `if`s,
-`match`es and `Id` binds.  `γ` is the result type of the loop function. -/
-partial def toTail (rec ret : Lean.Expr → MetaM Lean.Expr) (γ : Lean.Expr) (e : Lean.Expr) :
-    MetaM Lean.Expr := do
-  let go := toTail rec ret γ
-  let e := e.consumeMData.headBeta
-  if let some x := idPure? e then return ← go x
-  if e.isAppOfArity ``Id.run 2 then return ← go (e.getArg! 1)
-  if e.isAppOfArity ``ForInStep.yield 2 then return ← rec (e.getArg! 1)
-  if e.isAppOfArity ``ForInStep.done 2 then return ← ret (e.getArg! 1)
-  -- a jump to a join point of the loop body (already turned into the loop's result type)
-  if let some (α, _, x, k) := idBind? e then
-    let k := k.consumeMData
-    if let .lam n _ b _ := k then
-      if !b.hasLooseBVars then return ← go b
-      return ← withLetDecl n α x fun v => do
-        let b' ← go (b.instantiate1 v)
-        return Lean.mkLet n α x (b'.abstract #[v]) (nondep := true)
-    return ← go (mkApp k x)
-  if let .letE n t v b nd := e then
-    -- a join point of the loop body (`let __do_jp := fun … => …` of `do` notation)
-    let arity ← forallTelescope t fun xs r => do
-      let r := r.consumeMData
-      let isStep := r.isAppOfArity ``ForInStep 1 ||
-        (r.isAppOfArity ``Id 1 && (r.getArg! 0).consumeMData.isAppOfArity ``ForInStep 1)
-      return if isStep then xs.size else 0
-    if arity > 0 then
-      -- inlined: the join point generalises the mutable variables, which would hide from the
-      -- termination proof how they relate to the loop state
-      return ← go (b.instantiate1 v)
-    return ← withLetDecl n t v fun x => do
-      let b' ← go (b.instantiate1 x)
-      return Lean.mkLet n t v (b'.abstract #[x]) nd
-  if e.isAppOfArity ``ite 5 then
-    let u ← getLevel γ
-    return mkApp5 (mkConst ``ite [u]) γ (e.getArg! 1) (e.getArg! 2)
-      (← go (e.getArg! 3)) (← go (e.getArg! 4))
-  if e.isAppOfArity ``dite 5 then
-    let u ← getLevel γ
-    let br (f : Lean.Expr) : MetaM Lean.Expr := do
-      let f := f.consumeMData
-      let .lam n d _ _ := f | throwError "lean_while_to_wf: unexpected branch of `dite`{indentExpr f}"
-      withLocalDecl n .default d fun h => do
-        mkLambdaFVars #[h] (← go (mkApp f h).headBeta)
-    return mkApp5 (mkConst ``dite [u]) γ (e.getArg! 1) (e.getArg! 2)
-      (← br (e.getArg! 3)) (← br (e.getArg! 4))
-  if let some m ← matchMatcherApp? e then
-    unless m.remaining.isEmpty do
-      throwError "lean_while_to_wf: unsupported `match` in a loop body{indentExpr e}"
-    let motive ← lambdaTelescope m.motive fun xs _ => mkLambdaFVars xs γ
-    let nums := m.altNumParams
-    let alts ← (m.alts.zip nums).mapM fun (alt, k) =>
-      lambdaBoundedTelescope alt k fun zs b => do
-        unless zs.size == k do throwError "lean_while_to_wf: unexpected `match` alternative"
-        mkLambdaFVars zs (← go b)
-    return { m with motive, alts }.toExpr
-  throwError "lean_while_to_wf: unsupported construct in the body of a `while` loop{indentExpr e}"
 
 /-! ## Generating the declarations -/
 
@@ -320,9 +119,10 @@ partial def genLoop (st : IO.Ref GenState) (β body : Lean.Expr) :
   let idx := (← st.get).count + 1
   st.modify fun s => { s with count := idx }
   let fn := (← st.get).fn
-  let tys := stateTys β
+  let lay ← stateLayout β body
+  let tys := lay.tys
   let k := tys.length
-  let names ← stateNames body k
+  let names ← stateNames lay body
   -- the loop body, with its inner loops replaced (by the body constants for the copy `bodyC`,
   -- by the loop functions for the tail-recursive version `bodyW`)
   let (bodyC, bodyW) ← lambdaBoundedTelescope body 2 fun zs b => do
@@ -342,11 +142,11 @@ partial def genLoop (st : IO.Ref GenState) (β body : Lean.Expr) :
   let stDecls := (names.toArray.zip tys.toArray).map fun (n, t) =>
     (n, BinderInfo.default, fun (_ : Array Lean.Expr) => pure t)
   let (loopTy, loopVal) ← withLocalDecls stDecls fun ss => do
-    let st0 ← mkMProd ss.toList tys
+    let st0 ← mkState lay ss.toList
     let b := (mkApp2 bodyW (mkConst ``Unit.unit) st0).headBeta
     let rec_ (v : Lean.Expr) : MetaM Lean.Expr := do
-      return mkAppN (mkConst loopName) (fvs ++ (← mprodComps v k).toArray)
-    let ret (v : Lean.Expr) : MetaM Lean.Expr := do mkTuple (← mprodComps v k)
+      return mkAppN (mkConst loopName) (fvs ++ (← stateComps lay v).toArray)
+    let ret (v : Lean.Expr) : MetaM Lean.Expr := do mkTuple (← stateComps lay v)
     let t ← toTail rec_ ret γ b
     let t ← cleanup t
     return (← mkForallFVars (fvs ++ ss) γ, ← mkLambdaFVars (fvs ++ ss) t)
@@ -381,22 +181,22 @@ partial def genLoop (st : IO.Ref GenState) (β body : Lean.Expr) :
   let applyPf ← forallTelescope applyTy fun xs eq => do
     mkLambdaFVars xs (← mkEqRefl eq.appArg!)
   addThm (bodyName ++ `apply) applyTy applyPf
-  -- `f.loop_i_eq : LoopLaw → ∀ fvs b, forIn Loop.mk b (f.body_i fvs) = …`
+  -- `f.loop_i_eq : ∀ fvs b, forIn Loop.mk b (f.body_i fvs) = …`
   let forInOf (b : Lean.Expr) : MetaM Lean.Expr :=
     mkAppOptM ``ForIn.forIn #[mkConst ``Id [0], mkConst ``Lean.Loop, mkConst ``Unit, none, β,
       mkConst ``Lean.Loop.mk, b, bodyApp]
   let rhsOf (args : List Lean.Expr) : MetaM Lean.Expr := do
     let p := mkAppN (mkConst loopName) (fvs ++ args.toArray)
-    mkMProd (← tupleComps p k) tys
-  let (eqTy, auxTy) ← withLocalDeclD `h (mkConst ``WFLang.LoopLaw) fun h => do
+    mkState lay (← tupleComps p k)
+  let (eqTy, auxTy) ← do
     let general ← withLocalDeclD `b β fun b => do
-      mkForallFVars #[b] (← mkEq (← forInOf b) (← rhsOf (← mprodComps b k)))
+      mkForallFVars #[b] (← mkEq (← forInOf b) (← rhsOf (← stateComps lay b)))
     let aux ← withLocalDecls stDecls fun ss => do
-      mkForallFVars ss (← mkEq (← forInOf (← mkMProd ss.toList tys)) (← rhsOf ss.toList))
-    return (← mkForallFVars (#[h] ++ fvs) general, ← mkForallFVars (#[h] ++ fvs) aux)
+      mkForallFVars ss (← mkEq (← forInOf (← mkState lay ss.toList)) (← rhsOf ss.toList))
+    pure (← mkForallFVars fvs general, ← mkForallFVars fvs aux)
   -- the proof: induction along the loop function, one unfolding of `while` per step
   let s ← st.get
-  let hI := mkIdent `wfLoopLaw
+  let hI := mkIdent ``WFLang.loopLaw
   let fvIds := (List.range fvs.size).toArray.map fun i => mkIdent (Name.mkSimple s!"wfv{i}")
   let sIds := (List.range k).toArray.map fun i => mkIdent (Name.mkSimple s!"wfs{i}")
   let simpIds : Array Ident :=
@@ -405,13 +205,13 @@ partial def genLoop (st : IO.Ref GenState) (β body : Lean.Expr) :
   let simpLemmas ← simpIds.mapM fun i => `(Lean.Parser.Tactic.simpLemma| $i:ident)
   let lIdent := mkIdent loopName
   let auxPf ← runTac auxTy (← `(tactic| (
-      intro $hI:ident $fvIds* $sIds*
+      intro $fvIds* $sIds*
       fun_induction $lIdent:ident $fvIds* $sIds*
       all_goals (rw [$hI:ident]; try simp_all +zetaDelta only [$simpLemmas,*, ↓reduceIte, ↓reduceDIte])
       all_goals (first | rfl | assumption))))
   let eqPf ← forallTelescope eqTy fun xs _ => do
     let b := xs.back!
-    let comps ← mprodComps b k
+    let comps ← stateComps lay b
     mkLambdaFVars xs (mkAppN auxPf (xs.pop ++ comps.toArray))
   addThm eqName eqTy eqPf
   st.modify fun s =>
@@ -443,12 +243,13 @@ partial def process (st : IO.Ref GenState) (e : Lean.Expr) : TermElabM (Lean.Exp
     let x := e.getArg! 4
     let xC := mkAppN x.consumeMData.getAppFn (x.consumeMData.getAppArgs.set! 6 initC |>.set! 7 bodyApp)
     let eC := mkAppN e.getAppFn (e.getAppArgs.set! 4 xC |>.set! 5 kC)
-    let tys := stateTys β
+    let lay ← stateLayout β body
+    let tys := lay.tys
     let n := tys.length
-    let call := mkAppN (mkConst loopName) (fvs ++ (← mprodComps initW n).toArray)
+    let call := mkAppN (mkConst loopName) (fvs ++ (← stateComps lay initW).toArray)
     let γ ← mkTupleTy tys
     let eW ← withLetDecl `p γ call fun p => do
-      let st' ← mkMProd (← tupleComps p n) tys
+      let st' ← mkState lay (← tupleComps p n)
       let b ← cleanup (mkApp kW st').headBeta
       return Lean.mkLet `p γ call (b.abstract #[p]) (nondep := true)
     return (eC, eW)
@@ -457,10 +258,10 @@ partial def process (st : IO.Ref GenState) (e : Lean.Expr) : TermElabM (Lean.Exp
     let (initC, initW) ← process st init
     let (loopName, fvs, bodyApp) ← genLoop st β body
     let eC := mkAppN e.getAppFn (e.getAppArgs.set! 6 initC |>.set! 7 bodyApp)
-    let tys := stateTys β
-    let n := tys.length
-    let call := mkAppN (mkConst loopName) (fvs ++ (← mprodComps initW n).toArray)
-    return (eC, ← cleanup (← mkMProd (← tupleComps call n) tys))
+    let lay ← stateLayout β body
+    let n := lay.size
+    let call := mkAppN (mkConst loopName) (fvs ++ (← stateComps lay initW).toArray)
+    return (eC, ← cleanup (← mkState lay (← tupleComps call n)))
   match e with
   | .app .. =>
     let fn := e.getAppFn
@@ -528,17 +329,15 @@ partial def genWFCore (fn : Name) (hints : Array TerminationHints) : TermElabM U
   addDef wfName ty valW
   compileDecls #[wfName]
   setInlinable wfName
-  -- `f.eq_wf : LoopLaw → ∀ xs, f xs = f.wf xs`
-  let eqTy ← withLocalDeclD `h (mkConst ``WFLang.LoopLaw) fun h => forallTelescope ty fun xs _ => do
-    mkForallFVars (#[h] ++ xs) (← mkEq (mkAppN (mkConst fn) xs) (mkAppN (mkConst wfName) xs))
+  -- `f.eq_wf : ∀ xs, f xs = f.wf xs`
+  let eqTy ← forallTelescope ty fun xs _ => do
+    mkForallFVars xs (← mkEq (mkAppN (mkConst fn) xs) (mkAppN (mkConst wfName) xs))
   -- the goal in the form `eC xs = eW xs` (definitionally equal)
-  let goalC ← withLocalDeclD `h (mkConst ``WFLang.LoopLaw) fun h => forallTelescope ty fun xs _ => do
-    mkForallFVars (#[h] ++ xs) (← mkEq (valC.beta xs) (valW.beta xs))
-  let hI := mkIdent `wfLoopLaw
+  let goalC ← forallTelescope ty fun xs _ => do
+    mkForallFVars xs (← mkEq (valC.beta xs) (valW.beta xs))
   let lemmas ← (s.eqns ++ s.calleeEqns).mapM fun n =>
-    `(Lean.Parser.Tactic.simpLemma| $(mkIdent n):ident $hI:ident)
+    `(Lean.Parser.Tactic.simpLemma| $(mkIdent n):ident)
   let pf ← runTac goalC (← `(tactic| (
-      intro $hI:ident
       intros
       (try simp only [$lemmas,*])
       (try rfl))))
@@ -566,7 +365,7 @@ def elabWhileHint (stx : TSyntax ``whileHint) : TermElabM TerminationHints := do
 
 /-- `lean_while_to_wf f (termination_by … (decreasing_by …)?)*`: the well-founded version
 `f.wf` of a (non-recursive) function `f` written with Lean's `while` loops, and
-`f.eq_wf : LoopLaw → ∀ xs, f xs = f.wf xs`.  The `i`-th termination hint is the termination
+`f.eq_wf : ∀ xs, f xs = f.wf xs`.  The `i`-th termination hint is the termination
 argument of the `i`-th loop of `f` (in source order); it refers to the mutable variables of the
 loop by their names (and to the variables of `f` the loop reads).  Without a hint, Lean guesses
 the measure. -/

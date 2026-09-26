@@ -11,7 +11,7 @@ import Mathlib.Order.RelClasses
 * the primitive binary operators `BinOp` (`+ - * / %`, `<`, `≤`, `bool_eq`, `&&`, `||`, and
   more: `^`, shifts, bitwise operators, `gcd`, `lcm`, the same arithmetic on `Int`, pairing,
   `cons`, `++`) and unary operators `UnOp` (`log2`, `Int` negation and conversions,
-  projections, `head`, `tail`, `isNil`, `length`).
+  projections, `head`, `tail`, `isNil`, `length`, `List.range`, `List.sum`).
 -/
 
 namespace WFLang
@@ -223,6 +223,10 @@ inductive UnOp : Ty → Ty → Type where
   | tail (t : Ty) : UnOp (.list t) (.list t)
   | isNil (t : Ty) : UnOp (.list t) .bool
   | length (t : Ty) : UnOp (.list t) .nat
+  /-- `List.range n = [0, 1, …, n - 1]` -/
+  | range : UnOp .nat (.list .nat)
+  /-- `List.sum` of a list of `Nat` -/
+  | sum : UnOp (.list .nat) .nat
   deriving DecidableEq, Repr, Hashable
 
 /-- Meaning of the unary operators. -/
@@ -238,6 +242,8 @@ def UnOp.eval : {a b : Ty} → UnOp a b → a.denote → b.denote
   | _, _, .tail _, x => x.tail
   | _, _, .isNil _, x => x.isEmpty
   | _, _, .length _, x => x.length
+  | _, _, .range, x => List.range x
+  | _, _, .sum, x => @List.sum Nat _ _ x
 
 /-! ## Relations with fixed parameters -/
 

@@ -62,7 +62,7 @@ functions, called with `gCall`.
 | `Tco.iter`, `Tco.hyperLoop` (function parameters) | captured when specialised | `#lean_wf_func_to_term (Tco.iter Tco.mc91)` captures the copy specialised to a closed function argument; a call with a function argument inside another function is specialised at the call site, the free variables of the argument becoming extra (fixed) parameters (`useIter`: `Tco.iter (fun x => x + k) n 0`) |
 | `Tco.hyperWhile` (a `for` loop whose body calls `hyperWhile`), `Tco.hyperTCO` (`hyperLoop (hyperTCO n a) …`), `Tco.ack2` (`ackInner (ack2 m)`, a function result), `loopRec`, `foldRec`, `viaApplyN` | captured | **recursion through a function argument**, see below |
 | `useHyperWhile`, `sumHyperTCO` | captured | functions calling the above: their node is called with tag `0` (and padding) |
-| `underLambda`: a call under `fun` in `List.map` over `List.attach` | **rejected** | see §6 |
+| `underLambda`: a call under `fun` in `List.map` over `List.attach` | captured | `List.map` is the grammar statement `Expr.map`; the membership proofs of `attach` are erased and become facts of the path condition used only by the decrease proofs (`Tests/Map.lean`, `underLambda_agree`); see §6 |
 
 **Recursion through a function argument.** When `f` calls a recursive function `g` with a
 function argument that calls `f` again, `f` and the copy of `g` specialised to that argument are
@@ -93,12 +93,11 @@ The agreement proof shows that the node computes
 
 ## 6. Still not supported
 
-* **Calls under a binder in library code**, e.g. `underLambda`:
-  `((List.range n).attach.map fun ⟨i, _⟩ => underLambda i).sum`. `List.map`, `List.range`,
-  `List.sum` are library functions, which are never inlined or specialised, and the termination
-  proof needs the membership `i ∈ List.range n` carried by `attach`. Supporting it would need
-  first-order replacements for these combinators (like `rangeLoop` for `for`) whose function
-  argument receives the membership proof, and a precondition on the list being traversed.
+* **Calls under a binder in library code other than `List.map`** (`List.foldl`, `any`/`all`,
+  `for x in l`, …). `List.map` itself is now a statement of the grammar (`Expr.map`), and
+  `underLambda`, `((List.range n).attach.map fun ⟨i, _⟩ => underLambda i).sum`, is captured
+  (`Tests/Map.lean`): the membership proofs carried by `attach` are erased, and the program maps
+  over `List.range n` with `i ∈ List.range n` in the path condition of the body.
 * **Function-valued parameters without a known argument**, e.g. `#lean_wf_func_to_term Tco.iter`
   on its own: the program would need function types in `Ty`. Capture a specialised copy instead.
 * **Mutually recursive functions with different parameter or result types**: the members of a
@@ -111,8 +110,8 @@ The agreement proof shows that the node computes
 * **Lean's own `while` loops** are now captured through `lean_while_to_wf`
   (`Capture/LeanWhile.lean`, `Tests/LeanWhile.lean`): each loop becomes a well-founded
   tail-recursive function with a measure given by the user (or guessed by Lean), and agreement is
-  proved under the hypothesis `LoopLaw`, the unfolding law of `Lean.Loop.forIn` (which is a
-  `partial def`, opaque to the logic). `isqrt`, `unpairLeft`, `unpairRight`, `diagonalWhile` and
+  proved with `WFLang.loopLaw`, the unfolding law of `Lean.Loop.forIn`, which Lean v4.34 proves
+  (`Lean.Loop.forIn_eq_of_monadTail`); no hypothesis is needed. `isqrt`, `unpairLeft`, `unpairRight`, `diagonalWhile` and
   `mc91While` are captured this way. Still rejected: `return` inside a loop, recursive functions
   containing a loop, and `ackWhile` / `ackNoDataStructure` (no measure: the stack needs a
   multiset order).

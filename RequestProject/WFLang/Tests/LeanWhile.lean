@@ -9,12 +9,12 @@ captured through their well-founded version (`Capture/LeanWhile.lean`):
 
 * `lean_while_to_wf f termination_by …` generates `f.loop_i` (each loop as a tail-recursive
   well-founded function on its mutable variables), `f.wf` and
-  `f.eq_wf : LoopLaw → ∀ xs, f xs = f.wf xs`;
+  `f.eq_wf : ∀ xs, f xs = f.wf xs`;
 * `#lean_wf_func_to_term f` captures `f.wf` (running `lean_while_to_wf f` first, with Lean's
   guessed measure, if it was not run);
-* `wf_agree` proves `∀ xs, Term.eval f_term xs = f xs` from a hypothesis `h : LoopLaw`, the
-  unfolding law of `while` (`Core/LeanWhile.lean`): nothing can be proved about Lean's `while`
-  without it, since `Lean.Loop.forIn` is opaque to the logic.
+* `wf_agree` proves `∀ xs, Term.eval f_term xs = f xs`, with no hypothesis: since Lean v4.34,
+  `Lean.Loop.forIn` is defined in the logic and satisfies its unfolding law
+  (`WFLang.loopLaw`, `Core/LeanWhile.lean`).
 
 Below: the uploaded `while` functions (`Tco.…`, `Tests/Functions.lean`), other loops (`break`,
 two loops in a row, nested loops, `match` in the body, `Int`/`Bool`/list state, a function calling
@@ -41,23 +41,23 @@ namespace LeanWhilePCL
 open PCL Tco.AckWithoutStackButUsingCantorPairing
 
 def isqrt_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term isqrt
-theorem isqrt_agree (h : LoopLaw) : ∀ n, Term.eval isqrt_term n = isqrt n := by wf_agree
+theorem isqrt_agree : ∀ n, Term.eval isqrt_term n = isqrt n := by wf_agree
 
 -- `unpairLeft`/`unpairRight` are not recursive; they call `isqrt`, whose loop is inlined.
 def unpairLeft_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term unpairLeft
-theorem unpairLeft_agree (h : LoopLaw) :
+theorem unpairLeft_agree :
     ∀ z, Term.eval unpairLeft_term z = unpairLeft z := by wf_agree
 
 def unpairRight_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term unpairRight
-theorem unpairRight_agree (h : LoopLaw) :
+theorem unpairRight_agree :
     ∀ z, Term.eval unpairRight_term z = unpairRight z := by wf_agree
 
 def diagonalWhile_term : Term ⟨[.nat, .nat], .nat⟩ := #lean_wf_func_to_term Tco.diagonalWhile
-theorem diagonalWhile_agree (h : LoopLaw) :
+theorem diagonalWhile_agree :
     ∀ m n, Term.eval diagonalWhile_term m n = Tco.diagonalWhile m n := by wf_agree
 
 def mc91While_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term Tco.mc91While
-theorem mc91While_agree (h : LoopLaw) :
+theorem mc91While_agree :
     ∀ n, Term.eval mc91While_term n = Tco.mc91While n := by wf_agree
 
 -- Each program has one loop (a recursive join point) and no global function.
@@ -73,23 +73,23 @@ end LeanWhilePCL
 /-! ## Theorems about the uploaded `while` functions
 
 `diagonalWhile_eq` is the theorem of the uploaded `TcoDiagonal.lean` that was left out of
-`Tests/SourceProofs.lean`, because nothing could be proved about a `while` loop: under the
-unfolding law of `while` it follows from the loop function `Tco.diagonalWhile.loop_1` (state
-`(acc, m, n)`) by functional induction. -/
+`Tests/SourceProofs.lean`, because nothing could be proved about a `while` loop at the time: with
+the unfolding law of `while` (`WFLang.loopLaw`) it follows from the loop function
+`Tco.diagonalWhile.loop_1` (state `(m, n, acc)`) by functional induction. -/
 
 namespace LeanWhileProofs
 
-theorem diagonalWhile_loop (acc m n : Nat) :
-    (Tco.diagonalWhile.loop_1 acc m n).1 = acc + Tco.diagonal m n := by
-  fun_induction Tco.diagonalWhile.loop_1 acc m n with
-  | case1 acc m n _ _ hm _ _ ih =>
+theorem diagonalWhile_loop (m n acc : Nat) :
+    (Tco.diagonalWhile.loop_1 m n acc).2.2 = acc + Tco.diagonal m n := by
+  fun_induction Tco.diagonalWhile.loop_1 m n acc with
+  | case1 m n acc _ _ hm _ _ ih =>
     rw [ih]
     show acc + 1 + Tco.diagonal (m - 1) (n + 1) = acc + Tco.diagonal m n
     obtain ⟨k, rfl⟩ : ∃ k, m = k + 1 := ⟨m - 1, by omega⟩
     rw [Tco.diagonal.eq_3]
     simp only [Nat.add_sub_cancel]
     omega
-  | case2 acc m n hc _ hm _ _ ih =>
+  | case2 m n acc hc _ hm _ _ ih =>
     rw [ih]
     show acc + 1 + Tco.diagonal (n - 1) 0 = acc + Tco.diagonal m n
     have hm0 : m = 0 := by omega
@@ -98,17 +98,16 @@ theorem diagonalWhile_loop (acc m n : Nat) :
     rw [Tco.diagonal.eq_2]
     simp only [Nat.add_sub_cancel]
     omega
-  | case3 acc m n hc =>
+  | case3 m n acc hc =>
     simp only [bne_iff_ne, ne_eq, Bool.or_eq_true, not_or,
       Classical.not_not] at hc
     obtain ⟨rfl, rfl⟩ := hc
     rw [Tco.diagonal.eq_1]
     rfl
 
-/-- **`diagonalWhile m n = diagonal m n`** (the theorem of the uploaded file), under the
-unfolding law of `while`. -/
-theorem diagonalWhile_eq (h : LoopLaw) (m n : Nat) : Tco.diagonalWhile m n = Tco.diagonal m n := by
-  rw [Tco.diagonalWhile.eq_wf h, Tco.diagonalWhile.wf, diagonalWhile_loop, Nat.zero_add]
+/-- **`diagonalWhile m n = diagonal m n`** (the theorem of the uploaded file). -/
+theorem diagonalWhile_eq (m n : Nat) : Tco.diagonalWhile m n = Tco.diagonal m n := by
+  rw [Tco.diagonalWhile.eq_wf, Tco.diagonalWhile.wf, diagonalWhile_loop, Nat.zero_add]
 
 theorem mc91While_loop (c cur : Nat) : (Tco.mc91While.loop_1 c cur).2 = Tco.mc91Loop c cur := by
   fun_induction Tco.mc91While.loop_1 c cur with
@@ -116,27 +115,27 @@ theorem mc91While_loop (c cur : Nat) : (Tco.mc91While.loop_1 c cur).2 = Tco.mc91
     rw [ih]
     show Tco.mc91Loop (c - 1) (cur - 10) = Tco.mc91Loop c cur
     obtain ⟨k, rfl⟩ : ∃ k, c = k + 1 := ⟨c - 1, by simp_all; omega⟩
-    rw [Tco.mc91Loop.eq_2, dif_pos hcur, Nat.add_sub_cancel]
+    rw [Tco.mc91Loop.eq_2, dite_eq_left hcur, Nat.add_sub_cancel]
   | case2 c cur hc hcur _ _ ih =>
     rw [ih]
     show Tco.mc91Loop (c + 1) (cur + 11) = Tco.mc91Loop c cur
     obtain ⟨k, rfl⟩ : ∃ k, c = k + 1 := ⟨c - 1, by simp_all; omega⟩
     conv_rhs => rw [Tco.mc91Loop.eq_2]
-    rw [dif_neg hcur]
+    rw [dite_eq_right hcur]
   | case3 c cur hc =>
     simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hc
     subst hc
     rw [Tco.mc91Loop.eq_1]
 
-/-- `mc91While n = mc91TR n`, under the unfolding law of `while`. -/
-theorem mc91While_eq (h : LoopLaw) (n : Nat) : Tco.mc91While n = Tco.mc91TR n := by
-  rw [Tco.mc91While.eq_wf h, Tco.mc91While.wf, mc91While_loop, Tco.mc91TR]
+/-- `mc91While n = mc91TR n`. -/
+theorem mc91While_eq (n : Nat) : Tco.mc91While n = Tco.mc91TR n := by
+  rw [Tco.mc91While.eq_wf, Tco.mc91While.wf, mc91While_loop, Tco.mc91TR]
 
 /-- The `PCL` program captured from the recursive `diagonal` computes `diagonalWhile`. -/
-theorem diagonal_term_eq_diagonalWhile (h : LoopLaw) :
+theorem diagonal_term_eq_diagonalWhile :
     ∀ m n, PCL.Term.eval ExPCL.diagonal_term m n = Tco.diagonalWhile m n := by
   intro m n
-  rw [ExPCL.diagonal_agree, diagonalWhile_eq h]
+  rw [ExPCL.diagonal_agree, diagonalWhile_eq]
 
 end LeanWhileProofs
 
@@ -241,30 +240,30 @@ namespace LeanWhileExPCL
 open PCL LeanWhileEx
 
 def gcdW_term : Term ⟨[.nat, .nat], .nat⟩ := #lean_wf_func_to_term gcdW
-theorem gcdW_agree (h : LoopLaw) : ∀ a b, Term.eval gcdW_term a b = gcdW a b := by wf_agree
+theorem gcdW_agree : ∀ a b, Term.eval gcdW_term a b = gcdW a b := by wf_agree
 
 def firstSq_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term firstSq
-theorem firstSq_agree (h : LoopLaw) : ∀ n, Term.eval firstSq_term n = firstSq n := by wf_agree
+theorem firstSq_agree : ∀ n, Term.eval firstSq_term n = firstSq n := by wf_agree
 
 def twoLoops_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term twoLoops
-theorem twoLoops_agree (h : LoopLaw) : ∀ n, Term.eval twoLoops_term n = twoLoops n := by
+theorem twoLoops_agree : ∀ n, Term.eval twoLoops_term n = twoLoops n := by
   wf_agree
 
 def nested_term : Term ⟨[.nat], .nat⟩ := #lean_wf_func_to_term nested
-theorem nested_agree (h : LoopLaw) : ∀ n, Term.eval nested_term n = nested n := by wf_agree
+theorem nested_agree : ∀ n, Term.eval nested_term n = nested n := by wf_agree
 
 def sumList_term : Term ⟨[.list .nat], .nat⟩ := #lean_wf_func_to_term sumList
-theorem sumList_agree (h : LoopLaw) : ∀ l, Term.eval sumList_term l = sumList l := by wf_agree
+theorem sumList_agree : ∀ l, Term.eval sumList_term l = sumList l := by wf_agree
 
 def countDown_term : Term ⟨[.int], .nat⟩ := #lean_wf_func_to_term countDown
-theorem countDown_agree (h : LoopLaw) : ∀ k, Term.eval countDown_term k = countDown k := by
+theorem countDown_agree : ∀ k, Term.eval countDown_term k = countDown k := by
   wf_agree
 
 def lcmW_term : Term ⟨[.nat, .nat], .nat⟩ := #lean_wf_func_to_term lcmW
-theorem lcmW_agree (h : LoopLaw) : ∀ a b, Term.eval lcmW_term a b = lcmW a b := by wf_agree
+theorem lcmW_agree : ∀ a b, Term.eval lcmW_term a b = lcmW a b := by wf_agree
 
 def countMultiples_term : Term ⟨[.nat, .nat], .nat⟩ := #lean_wf_func_to_term countMultiples
-theorem countMultiples_agree (h : LoopLaw) :
+theorem countMultiples_agree :
     ∀ n d, Term.eval countMultiples_term n d = countMultiples n d := by wf_agree
 
 -- The number of loops (recursive join points) of each program: one per `while`.
@@ -277,8 +276,8 @@ end LeanWhileExPCL
 
 /-! ## The generated declarations
 
-The loop of `gcdW` as a tail-recursive well-founded function, and the unfolding law of `while`
-turned into its equation. -/
+The loop of `gcdW` as a tail-recursive well-founded function, and its equation (proved with the
+unfolding law of `while`, `WFLang.loopLaw`). -/
 
 /--
 info: LeanWhileEx.gcdW.loop_1 (a b : ℕ) : ℕ × ℕ
@@ -287,15 +286,15 @@ info: LeanWhileEx.gcdW.loop_1 (a b : ℕ) : ℕ × ℕ
 #check LeanWhileEx.gcdW.loop_1
 
 /--
-info: LeanWhileEx.gcdW.eq_wf (h : LoopLaw) (a b : ℕ) : LeanWhileEx.gcdW a b = LeanWhileEx.gcdW.wf a b
+info: LeanWhileEx.gcdW.eq_wf (a b : ℕ) : LeanWhileEx.gcdW a b = LeanWhileEx.gcdW.wf a b
 -/
 #guard_msgs in
 #check LeanWhileEx.gcdW.eq_wf
 
 /-! ## Runtime checks against the compiled Lean functions
 
-The compiled code of Lean's `while` is the real loop (not the opaque constant of the logic), so
-these compare the captured programs with the uploaded functions as they run. -/
+These compare the captured programs with the compiled code of the uploaded functions (which runs
+Lean's `while` loop itself), in addition to the agreement theorems above. -/
 
 section
 open Tco.AckWithoutStackButUsingCantorPairing
@@ -368,6 +367,6 @@ end LeanWhileRejected
 #guard_msgs in
 #expect_reject (#lean_wf_func_to_term LeanWhileRejected.findDiv : PCL.Term ⟨[.nat], .nat⟩)
 
-/-- info: rejected: #lean_wf_func_to_term: call in an unsupported position -/
+/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
 #guard_msgs in
 #expect_reject (#lean_wf_func_to_term LeanWhileRejected.recLoop : PCL.Term ⟨[.nat], .nat⟩)

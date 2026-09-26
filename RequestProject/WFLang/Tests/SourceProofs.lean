@@ -10,15 +10,12 @@ were removed; `Sources.lean` uses them to transfer the `PCL` agreement theorems 
 functions that `PCL` cannot capture directly (`ack2`, `hyperTCO`, `hyperWhile`).
 
 Changes with respect to the uploaded files:
-* `mc91Loop_eq`: the uploaded proof used `grind => instantiate only [mc91Loop, iter]`, whose
-  syntax does not exist in this Lean version; it is now proved through `Function.iterate`
-  (see the last item).
-* `diagonalWhile_eq` (`diagonalWhile m n = diagonal m n`) is **not** included.  Its proof was
-  written for a later Lean (`v4.34.0`) whose `mvcgen` has a specification for `while` loops.  In
-  this project's Lean (`v4.28.0`) a `while` loop is `Lean.Loop.forIn`, defined through a private
-  `partial` function, which is opaque to proofs, so the statement cannot be proved here.
-  `Sources.lean` checks it on sample inputs instead (and does the same for the other
-  `while`-loop functions).
+* `mc91Loop_eq`: the uploaded proof used `grind => instantiate only [mc91Loop, iter]`; it is
+  proved here through `Function.iterate` instead (see the last item).
+* `diagonalWhile_eq` (`diagonalWhile m n = diagonal m n`) is about a function written with
+  Lean's `while`; it is proved in `Tests/LeanWhile.lean` (`LeanWhileProofs.diagonalWhile_eq`),
+  through the capture of `diagonalWhile` and the unfolding law of `while` (`WFLang.loopLaw`, a
+  theorem in Lean v4.34, where `while` is defined in the logic).
 * The two iteration helpers `iter` and `hyperLoop` are identified with Mathlib's
   `Function.iterate` (`f^[n]`, lemmas `iter_eq_iterate`, `hyperLoop_eq_iterate`), and the
   proofs of `hyperLoop_step` and `mc91Loop_eq` use Mathlib's iterate lemmas instead of
@@ -180,9 +177,9 @@ theorem mc91Loop_eq (c n : Nat) : mc91Loop c n = iter mc91 c n := by
   induction c, n using mc91Loop.induct with
   | case1 n => simp [mc91Loop]
   | case2 c n hgt ih =>
-    rw [mc91Loop, dif_pos hgt, ih, Function.iterate_succ_apply, mc91_step_gt hgt]
+    rw [mc91Loop, dite_eq_left hgt, ih, Function.iterate_succ_apply, mc91_step_gt hgt]
   | case3 c n hle ih =>
-    rw [mc91Loop, dif_neg hle, ih, Function.iterate_succ_apply, Function.iterate_succ_apply,
+    rw [mc91Loop, dite_eq_right hle, ih, Function.iterate_succ_apply, Function.iterate_succ_apply,
       mc91_step_le (by omega), Function.iterate_succ_apply]
 
 -- Main Theorem: mc91TR n = mc91 n

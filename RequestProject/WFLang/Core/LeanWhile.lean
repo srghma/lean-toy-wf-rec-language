@@ -6,12 +6,12 @@ module
 In `do` notation, `while c do body` (and `repeat`) expands to `for _ in Lean.Loop.mk do …`, i.e.
 `forIn Lean.Loop.mk init step` where `step : Unit → β → Id (ForInStep β)` runs one iteration on
 the tuple `β` of the mutable variables and returns `ForInStep.yield b'` (go on with `b'`) or
-`ForInStep.done b'` (stop, `break` or the test is false).  `forIn` for `Lean.Loop` is
-`Lean.Loop.forIn`, a **`partial def`**: in the logic it is an opaque constant, so no theorem
-about a function using `while` can be proved without an assumption about it.
+`ForInStep.done b'` (stop, `break` or the test is false).
 
-`LoopLaw` is that assumption: the unfolding equation that `Lean.Loop.forIn` satisfies by its
-definition (it is the equation of its compiled code, `Init/While.lean`):
+Since Lean v4.34, `Lean.Loop.forIn` is defined in the logic (through `repeatM`, whose value is
+pinned to the least fixed point of its body in every monad with a `Lean.Order.MonadTail`
+instance, e.g. `Id`), and Lean proves its one-step unfolding
+(`Lean.Loop.forIn_eq_of_monadTail`).  `LoopLaw` states that unfolding in the `Id` monad:
 
 ```
 forIn Loop.mk b f = match f () b with
@@ -19,28 +19,32 @@ forIn Loop.mk b f = match f () b with
   | .yield b' => forIn Loop.mk b' f
 ```
 
-It is used as an explicit **hypothesis** (never as an axiom) of the agreement theorems of the
-functions using `while` that `#lean_wf_func_to_term` captures.
-
-* `loopLaw_satisfiable`: the equation has a solution (for every `β` and body at once), so a
-  hypothesis `h : LoopLaw` is not contradictory in shape;
-* `LoopLaw.forIn_of_exit`: under the law, a loop that stops after `n` iterations computes the
-  value it stops with — the law determines `forIn Loop.mk` on every terminating loop.
+* `loopLaw`: **the law holds** (a theorem, from Lean's own unfolding lemma).  It is what the
+  generated equations `f.eq_wf : ∀ xs, f xs = f.wf xs` of the functions using `while` are proved
+  with, so the agreement theorems of these functions have no hypothesis;
+* `forIn_loop_of_exit`: a loop that stops after `n` iterations computes the value it stops
+  with (`LoopLaw.forIn_of_exit`: the same from any function satisfying the law).
 -/
 
 @[expose] public section
 
 namespace WFLang
 
-/-- **The unfolding law of Lean's `while` loop** (in the `Id` monad): the equation of
-`Lean.Loop.forIn`'s compiled code.  Lean's `partial def` gives no proof of it, so it is an
-explicit hypothesis of every theorem about a function using `while`. -/
+/-- **The unfolding law of Lean's `while` loop** (in the `Id` monad).  It holds: `loopLaw`. -/
 def LoopLaw : Prop :=
   ∀ (β : Type) (b : β) (f : Unit → β → Id (ForInStep β)),
     (forIn Lean.Loop.mk b f : Id β) =
       match f () b with
       | .done b' => pure b'
       | .yield b' => forIn Lean.Loop.mk b' f
+
+/-- **Lean's `while` loop satisfies its unfolding law** (Lean's `Lean.Loop.forIn_eq_of_monadTail`,
+in the `Id` monad). -/
+theorem loopLaw : LoopLaw := by
+  intro β b f
+  show Lean.Loop.forIn _ b f = _
+  rw [Lean.Loop.forIn_eq_of_monadTail]
+  rfl
 
 /-- `n` iterations of the loop body `f` from `b`, as long as it yields (`none` if it stopped
 before). -/
@@ -80,8 +84,8 @@ theorem loopStops_succ {β : Type} {f : Unit → β → Id (ForInStep β)} {b v 
     rw [hf]
     exact h
 
-/-- **The law determines `while` on terminating loops**: a loop that stops after `n` iterations
-with the value `v` computes `v`. -/
+/-- **The law determines `while` on terminating loops**: for any function satisfying the law, a
+loop that stops after `n` iterations with the value `v` computes `v`. -/
 theorem LoopLaw.forIn_of_exit (h : LoopLaw) {β : Type} (f : Unit → β → Id (ForInStep β)) :
     ∀ (n : Nat) (b v : β), LoopStops f b n v → (forIn Lean.Loop.mk b f : Id β) = v := by
   intro n
@@ -127,51 +131,11 @@ theorem loopStops_unique {β : Type} {f : Unit → β → Id (ForInStep β)} :
       cases hf'
       exact ih hv' hw'
 
-open Classical in
-/-- A solution of the loop equation: the value the loop stops with if it stops, and an
-arbitrary value (the same along the whole run) if it runs forever. -/
-noncomputable def loopSolution (β : Type) (b : β) (f : Unit → β → Id (ForInStep β)) : β :=
-  if hs : ∃ n v, LoopStops f b n v then Classical.choose (Classical.choose_spec hs)
-  else Classical.choice ⟨b⟩
-
-/-- **The loop equation has a solution**, for every type and body at once: a hypothesis
-`LoopLaw` asks `Lean.Loop.forIn` to be such a solution, which it is not contradictory to ask. -/
-theorem loopLaw_satisfiable :
-    ∃ F : (β : Type) → β → (Unit → β → Id (ForInStep β)) → β,
-      ∀ (β : Type) (b : β) (f : Unit → β → Id (ForInStep β)),
-        F β b f = match f () b with
-          | .done b' => b'
-          | .yield b' => F β b' f := by
-  refine ⟨loopSolution, fun β b f => ?_⟩
-  have spec : ∀ {b : β} (hs : ∃ n v, LoopStops f b n v),
-      LoopStops f b (Classical.choose hs) (Classical.choose (Classical.choose_spec hs)) :=
-    fun hs => Classical.choose_spec (Classical.choose_spec hs)
-  cases hf : f () b with
-  | done v =>
-    have hs : ∃ n v, LoopStops f b n v := ⟨0, v, loopStops_zero.mpr hf⟩
-    show loopSolution β b f = v
-    rw [loopSolution, dif_pos hs]
-    exact loopStops_unique (spec hs) (loopStops_zero.mpr hf)
-  | yield b' =>
-    show loopSolution β b f = loopSolution β b' f
-    by_cases hs : ∃ n v, LoopStops f b n v
-    · have hs' : ∃ n v, LoopStops f b' n v := by
-        obtain ⟨n, v, hnv⟩ := hs
-        cases n with
-        | zero => rw [loopStops_zero, hf] at hnv; cases hnv
-        | succ n =>
-          obtain ⟨b'', hf', h''⟩ := loopStops_succ.mp hnv
-          rw [hf] at hf'
-          cases hf'
-          exact ⟨n, v, h''⟩
-      rw [loopSolution, dif_pos hs, loopSolution, dif_pos hs']
-      obtain ⟨n', hn'⟩ := hs'
-      exact loopStops_unique (spec hs)
-        (loopStops_succ.mpr ⟨b', hf, spec ⟨_, _, hn'.choose_spec⟩⟩ :)
-    · have hs' : ¬ ∃ n v, LoopStops f b' n v := by
-        rintro ⟨n, v, hnv⟩
-        exact hs ⟨n + 1, v, loopStops_succ.mpr ⟨b', hf, hnv⟩⟩
-      rw [loopSolution, dif_neg hs, loopSolution, dif_neg hs']
+/-- **`while` computes the value it stops with**: a loop that stops after `n` iterations with the
+value `v` computes `v`. -/
+theorem forIn_loop_of_exit {β : Type} (f : Unit → β → Id (ForInStep β)) (n : Nat) (b v : β)
+    (h : LoopStops f b n v) : (forIn Lean.Loop.mk b f : Id β) = v :=
+  loopLaw.forIn_of_exit f n b v h
 
 end WFLang
 

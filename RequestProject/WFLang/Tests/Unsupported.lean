@@ -44,7 +44,6 @@ def intCases : Int → Nat
 
 /-! ## Library functions on lists, and higher-order combinators -/
 
-def mapSq (n : Nat) : List Nat := (List.range n).map (fun i => i * i)
 def listGetD (l : List Nat) (i : Nat) : Nat := l.getD i 0
 def listIdx (l : List Nat) (i : Nat) : Nat := l[i]!
 def listHas3 (l : List Nat) : Bool := l.contains 3
@@ -141,10 +140,6 @@ end Unsupported
 /-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
 #guard_msgs in
 #expect_reject (#lean_wf_func_to_term Unsupported.intCases : PCL.Term ⟨[.int], .nat⟩)
-
-/-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
-#guard_msgs in
-#expect_reject (#lean_wf_func_to_term Unsupported.mapSq : PCL.Term ⟨[.nat], .list .nat⟩)
 
 /-- info: rejected: #lean_wf_func_to_term: unsupported expression -/
 #guard_msgs in
